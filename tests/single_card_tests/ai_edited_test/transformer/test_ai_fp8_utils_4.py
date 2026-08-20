@@ -370,7 +370,7 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
             node.input_scale = paddle.ones([2, 1], dtype="float32")
             node.tokens_per_expert = [2]
             node.use_bf16_gemm_weight_grad = True
-            node.dw_p2p_overlap = False
+            node.p2p_overlap = False
             calls = MethodCalls()
             node.bwd_down_input_fp8 = calls.bwd_down_input_fp8
             node.bwd_gate_up_input_fp8 = calls.bwd_gate_up_input_fp8
@@ -404,7 +404,7 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
             node.input_scale = paddle.ones([2, 1], dtype="float32")
             node.tokens_per_expert = [2]
             node.use_bf16_gemm_weight_grad = False
-            node.dw_p2p_overlap = False
+            node.p2p_overlap = False
             calls = MethodCalls()
             node.bwd_down_input_fp8 = calls.bwd_down_input_fp8
             node.bwd_gate_up_input_fp8 = calls.bwd_gate_up_input_fp8
@@ -832,7 +832,7 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
         node.o1 = paddle.ones([2, 4], dtype="float32")
         node.input = paddle.ones([2, 2], dtype="float32")
         node.use_bf16_gemm_weight_grad = False
-        node.dw_p2p_overlap = False
+        node.p2p_overlap = False
         node.bwd_down_input_fp8 = (
             lambda w2, grad, o1, probs, inplace_swiglu_prob=False: (
                 paddle.ones([2, 4], dtype="float32"),

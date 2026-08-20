@@ -54,6 +54,10 @@ from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
 )
+from paddlefleet.transformer.dw_overlap import (
+    deferrable_linear,
+    deferred_grouped_dw_accumulator,
+)
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -994,7 +998,9 @@ class DSv4HybridAttention(Attention):
             )
 
             # Output projection
-            output, bias = self.o_proj(core_attn_out)
+            output, bias = deferrable_linear(
+                self.config, "attn_out_proj", self.o_proj, core_attn_out
+            )
 
             # Discard full_attn output (core_attn_out) — frees ~512 MB
             self._full_attn_recompute.discard_output_and_register_recompute(
@@ -1014,7 +1020,9 @@ class DSv4HybridAttention(Attention):
             )
 
             # Output projection
-            output, bias = self.o_proj(core_attn_out)
+            output, bias = deferrable_linear(
+                self.config, "attn_out_proj", self.o_proj, core_attn_out
+            )
 
             # Discard gated_attn output if it was independently recomputed
             if (
@@ -1172,12 +1180,30 @@ class DSv4HybridAttention(Attention):
                 self.config.fp8_wgrad,
             )
         else:
-            wo_a_weight = self.linear_o_group_proj.reshape(
-                [self.o_local_groups, self.config.o_lora_rank, -1]
-            )
+            group_shape = [
+                self.o_local_groups,
+                self.config.o_lora_rank,
+                self.linear_o_group_proj.shape[-1],
+            ]
             from paddlefleet.triton_ops import fused_grouped_matmul
 
-            core_attn_out = fused_grouped_matmul(core_attn_out, wo_a_weight)
+            dw_acc = deferred_grouped_dw_accumulator(
+                self.config, "attn_o_group_proj", self.linear_o_group_proj
+            )
+            if dw_acc is None:
+                core_attn_out = fused_grouped_matmul(
+                    core_attn_out, self.linear_o_group_proj.reshape(group_shape)
+                )
+            else:
+                # Hand in the leaf parameter, not a reshaped view: the deferred path
+                # returns None for the weight grad, which would cut the chain back
+                # to the parameter if the input were a non-leaf view.
+                core_attn_out = fused_grouped_matmul(
+                    core_attn_out,
+                    self.linear_o_group_proj,
+                    dw_accumulator=dw_acc,
+                    group_shape=group_shape,
+                )
             core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Apply gated attention
@@ -1206,7 +1232,9 @@ class DSv4HybridAttention(Attention):
         return core_attn_out
 
     def _gate(self, gate_source: Tensor, core_attn_out: Tensor) -> Tensor:
-        gate, _ = self.gate_proj(gate_source)
+        gate, _ = deferrable_linear(
+            self.config, "attn_gate_proj", self.gate_proj, gate_source
+        )
         if getattr(self.config, "sigmoid_gate_fusion", False):
             from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
@@ -1554,8 +1582,8 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         b, sq, _ = hidden_states.shape
 
         # Q path
-        q_compressed, _ = self.linear_q_down_proj(
-            hidden_states
+        q_compressed, _ = deferrable_linear(
+            self.config, "attn_q_proj", self.linear_q_down_proj, hidden_states
         )  # [b, sq, q_lora_rank]
         q_compressed = self.q_layernorm(q_compressed)
 
@@ -1571,8 +1599,8 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             )  # [b, sq, k, g_q, q_head_dim]
             q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
         else:
-            q, _ = self.linear_q_up_proj(
-                q_compressed
+            q, _ = deferrable_linear(
+                self.config, "attn_q_proj", self.linear_q_up_proj, q_compressed
             )  # [b, sq, n * v_head_dim]
             q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
         q = _q_rms_norm(
@@ -1583,7 +1611,9 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )
 
         # KV path
-        kv, _ = self.linear_kv_proj(hidden_states)  # [b, sq, v_head_dim]
+        kv, _ = deferrable_linear(
+            self.config, "attn_kv_proj", self.linear_kv_proj, hidden_states
+        )  # [b, sq, v_head_dim]
 
         if self.config.swa_high_precision_norm:
             kv = self.kv_layernorm(

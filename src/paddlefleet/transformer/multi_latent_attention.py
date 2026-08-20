@@ -16,15 +16,11 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from functools import partial
 from typing import NoReturn
 
 import paddle
 from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
-from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
-    WeightGradStore,
-)
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.context_parallel_utils import (
@@ -59,6 +55,7 @@ from paddlefleet.tensor_parallel.mappings import (
 )
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
@@ -303,64 +300,6 @@ class MLASelfAttentionSublayersSpec:
     core_attention: LayerSpec | type = None
     o_proj: LayerSpec | type = None
     gate_proj: LayerSpec | type = None
-
-
-class FP8OverlapProj(paddle.autograd.PyLayer):
-    """
-    Replaces RowParallelLinear (no bias, mp==1) with explicit split backward.
-    Defers dw computation via WeightGradStore to overlap with P2P communication.
-    Bit-exact with F.linear(x, weight) for arbitrary batch dimensions.
-    """
-
-    @staticmethod
-    def forward(ctx, x, weight):
-        ctx.save_for_backward(x, weight)
-        # Bit-exact with RowParallelLinear mp==1, no bias:
-        # F.linear(x, weight) = x @ weight, weight shape: [in, out]
-        return paddle.nn.functional.linear(x, weight)
-
-    @staticmethod
-    def backward(ctx, out_grad):
-        x, weight = ctx.saved_tensor()
-
-        def _compute_weight_grad(x, out_grad, weight):
-            with paddle.amp.auto_cast(False):
-                # Flatten all leading batch dims to 2D before matmul,
-                # so dw = x_2d.T @ out_grad_2d has shape [in, out] == weight.shape
-                x_2d = x.reshape([-1, x.shape[-1]])  # [B*S, in]
-                og_2d = out_grad.reshape([-1, out_grad.shape[-1]])  # [B*S, out]
-                w_grad = paddle.matmul(
-                    x_2d, og_2d, transpose_x=True
-                )  # [in, out]
-                # print("w_grad compute")
-
-            if hasattr(weight, "main_grad"):
-                if weight.main_grad is None:
-                    weight.main_grad = paddle.zeros(
-                        weight.shape, dtype=paddle.float32
-                    )
-                weight.main_grad.add_(w_grad)
-            else:
-                raise AssertionError("fp8 overlap need main_grad attribute")
-
-            if hasattr(weight, "_apply_backward_hook"):
-                weight._apply_backward_hook()
-
-        # dx = out_grad @ weight.T, weight: [in, out] -> [out, in]
-        dx = paddle.matmul(out_grad, weight, transpose_y=True)
-
-        # dw computation (deferred via WeightGradStore)
-        if not weight.stop_gradient:
-            # print("enter overlap weight grad")
-            WeightGradStore.enabled = True
-            WeightGradStore.put(
-                partial(
-                    _compute_weight_grad, x.detach(), out_grad.detach(), weight
-                )
-            )
-            WeightGradStore.enabled = False
-
-        return dx, None
 
 
 class MultiLatentAttention(Attention):
@@ -1171,13 +1110,9 @@ class MultiLatentAttention(Attention):
             else:
                 core_attn_out = self._gate(gate_source, core_attn_out)
 
-        if getattr(self.config, "dw_p2p_overlap", False) and not getattr(
-            self.config, "use_bias", False
-        ):
-            output = FP8OverlapProj.apply(core_attn_out, self.o_proj.weight)
-            bias = None
-        else:
-            output, bias = self.o_proj(core_attn_out)
+        output, bias = deferrable_linear(
+            self.config, "attn_out_proj", self.o_proj, core_attn_out
+        )
 
         if self.gated_attention and self.recompute_gated_attn:
             gate_recompute.discard_output_and_register_recompute(output)
@@ -1187,7 +1122,9 @@ class MultiLatentAttention(Attention):
         return output, bias
 
     def _gate(self, gate_source, core_attn_out):
-        gate, _ = self.gate_proj(gate_source)
+        gate, _ = deferrable_linear(
+            self.config, "attn_gate_proj", self.gate_proj, gate_source
+        )
         if self.config.sigmoid_gate_fusion:
             from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
@@ -1801,7 +1738,9 @@ class MLASelfAttention(MultiLatentAttention):
         if self.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [b, s, q_lora_rank / TP]
-            q_compressed, _ = self.q_a_proj(hidden_states)
+            q_compressed, _ = deferrable_linear(
+                self.config, "attn_q_proj", self.q_a_proj, hidden_states
+            )
 
             # When output is sharded (ColumnParallelLinear):
             # Gather output to restore output dim q_lora_rank;
@@ -1819,7 +1758,12 @@ class MLASelfAttention(MultiLatentAttention):
 
         # if kv_a_proj_with_mqa is ColumnParallelLinear:
         #     kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim) / TP]
-        kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
+        kv_combined, _ = deferrable_linear(
+            self.config,
+            "attn_kv_proj",
+            self.kv_a_proj_with_mqa,
+            hidden_states,
+        )
         if kv_combined.size(-1) != self.kv_lora_rank + self.qk_rope_head_dim:
             # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
@@ -1898,11 +1842,15 @@ class MLASelfAttention(MultiLatentAttention):
             if self.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_b_proj(q_compressed)
+                q, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_b_proj, q_compressed
+                )
             else:
                 # q_compressed: [num_tokens, hidden_size]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_proj(q_compressed)
+                q, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_proj, q_compressed
+                )
 
             # q: [num_tokens, n, q_head_dim]
             q = q.view(
@@ -1917,7 +1865,9 @@ class MLASelfAttention(MultiLatentAttention):
             if self.mqa_latent:
                 kv = None
             else:
-                kv, _ = self.kv_b_proj(kv_compressed)
+                kv, _ = deferrable_linear(
+                    self.config, "attn_kv_proj", self.kv_b_proj, kv_compressed
+                )
 
                 # Debug: print kv shape
                 # if self.layer_number == 0:
@@ -2951,12 +2901,19 @@ class MQASelfAttention(MLASelfAttention):
         # QKV down projection and layernorm
         # =========================================
         if self.config.q_lora_rank is not None:
-            q_compressed, _ = self.q_a_proj(hidden_states)
+            q_compressed, _ = deferrable_linear(
+                self.config, "attn_q_proj", self.q_a_proj, hidden_states
+            )
         else:
             q_compressed = hidden_states
 
         # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
-        kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
+        kv_combined, _ = deferrable_linear(
+            self.config,
+            "attn_kv_proj",
+            self.kv_a_proj_with_mqa,
+            hidden_states,
+        )
 
         # kv_compressed: [b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
         kv_compressed, k_pos_emb = paddle.split(
@@ -3005,11 +2962,15 @@ class MQASelfAttention(MLASelfAttention):
             if self.config.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_b_proj(q_compressed)
+                q, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_b_proj, q_compressed
+                )
             else:
                 # q_compressed: [num_tokens, hidden_size]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_proj(q_compressed)
+                q, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_proj, q_compressed
+                )
 
             # q: [num_tokens, n, q_head_dim]
             q = q.view(

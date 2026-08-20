@@ -33,6 +33,7 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 )
 
 from paddlefleet import tensor_parallel
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
@@ -839,7 +840,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 hs_streams = hs_streams * mtp_hidden_inputs_mask.unsqueeze(-1)
 
             # e_proj: [.., h] -> [.., h/tp]
-            e_out, _ = self.e_proj(decoder_input)
+            e_out, _ = deferrable_linear(
+                self.config, "mtp_e_proj", self.e_proj, decoder_input
+            )
             # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
             # 4D tensor [b,s,n,h] causes .t() error in backward; reshape to 3D first
             orig_shape = list(hs_streams.shape)  # [s/sp, b, n, h]
@@ -847,7 +850,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 # [s/sp, b, n, h] --> [s, b, n, h]
                 orig_shape[0] = orig_shape[0] * self.tensor_parallel
             hs_flat = hs_streams.reshape([-1, orig_shape[-1]])  # [s/sp*b*n, h]
-            h_out, _ = self.h_proj(hs_flat)  # [s*b*n, h/tp]
+            h_out, _ = deferrable_linear(
+                self.config, "mtp_h_proj", self.h_proj, hs_flat
+            )  # [s*b*n, h/tp]
             h_out = h_out.reshape([*orig_shape[:-1], -1])  # [s, b, n, h/tp]
             # Broadcast add before gather (saves one all-gather vs gathering separately)
             hidden_states = e_out.unsqueeze(-2) + h_out

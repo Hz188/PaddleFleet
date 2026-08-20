@@ -36,6 +36,7 @@ import paddle.nn.functional as F
 from paddle import Tensor, framework, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
@@ -1724,8 +1725,12 @@ class Compressor(nn.Layer):
                 x, self.linear_wgate.weight
             )  # [b, sq, coff * head_dim]
         else:
-            kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
-            score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
+            kv, _ = deferrable_linear(
+                self.config, "attn_compressor_proj", self.linear_wkv, x
+            )  # [b, sq, coff * head_dim]
+            score, _ = deferrable_linear(
+                self.config, "attn_compressor_proj", self.linear_wgate, x
+            )  # [b, sq, coff * head_dim]
 
         cp_size = getattr(cp_group, "nranks", 1) if cp_group is not None else 1
         cp_rank = cp_group.rank if cp_size > 1 else 0
