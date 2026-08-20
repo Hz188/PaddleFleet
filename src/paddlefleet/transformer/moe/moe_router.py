@@ -37,6 +37,8 @@ from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.dw_overlap import nvtx_tag_dw
+from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddle._C_ops import matmul_grad
 from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
@@ -164,11 +166,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, w, dw_p2p_overlap=False):
+    def forward(ctx, x, w, p2p_overlap=False):
         """
         forward
         """
-        ctx.dw_p2p_overlap = dw_p2p_overlap
+        ctx.p2p_overlap = p2p_overlap
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
@@ -206,7 +208,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             if hasattr(weight, "_apply_backward_hook"):
                 weight._apply_backward_hook()
 
-        if ctx.dw_p2p_overlap:
+        if ctx.p2p_overlap:
             x_cast = x.cast(ctx.dtype)
             w_cast = w.cast(ctx.dtype)
 
@@ -218,11 +220,14 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             else:
                 WeightGradStore.enabled = True
                 WeightGradStore.put(
-                    partial(
-                        _compute_weight_grad,
-                        x_cast.detach(),
-                        y_grad.detach(),
-                        w,
+                    nvtx_tag_dw(
+                        "moe_router_gate",
+                        partial(
+                            _compute_weight_grad,
+                            x_cast.detach(),
+                            y_grad.detach(),
+                            w,
+                        ),
                     )
                 )
                 WeightGradStore.enabled = False
@@ -250,10 +255,10 @@ def gate_detach_matmul(
     weight,
     use_fuse,
     moe_router_force_load_balancing=False,
-    dw_p2p_overlap=False,
+    p2p_overlap=False,
 ):
     if use_fuse:
-        score = FusedGateDetachMatmul.apply(x, weight, dw_p2p_overlap)
+        score = FusedGateDetachMatmul.apply(x, weight, p2p_overlap)
     else:
         x = x.cast(paddle.float32)
         score = F.linear(x, weight)
@@ -367,7 +372,7 @@ class StandardMoERouter(nn.Layer):
         if self.moe_split_feature_routing:
             # Same layout / init as ``self.weight`` ([num_experts, hidden_size])
             # so the two views are symmetric and the projection can reuse the
-            # fused gate matmul (force-load-balancing and dw_p2p_overlap paths
+            # fused gate matmul (force-load-balancing and p2p_overlap paths
             # included). ``self.weight`` is reused as the first view, so no
             # extra gate is wasted. The scoring_func == "sigmoid" contract is
             # checked later in set_layer_number(), once we know whether this is
@@ -1267,20 +1272,20 @@ class TopKRouter(StandardMoERouter):
                 # per-expert scores. View 0 reuses the existing self.weight
                 # gate, view 1 uses the new self.weight_1 projection. Both
                 # reuse the fused gate matmul so they share the
-                # force-load-balancing and dw_p2p_overlap paths.
+                # force-load-balancing and p2p_overlap paths.
                 logits_0 = gate_detach_matmul(
                     input,
                     self.weight,
                     True,
                     self.config.moe_router_force_load_balancing,
-                    getattr(self.config, "dw_p2p_overlap", False),
+                    dw_overlap_enabled(self.config, "moe_router_gate"),
                 )
                 logits_1 = gate_detach_matmul(
                     input,
                     self.weight_1,
                     True,
                     self.config.moe_router_force_load_balancing,
-                    getattr(self.config, "dw_p2p_overlap", False),
+                    dw_overlap_enabled(self.config, "moe_router_gate"),
                 )
                 # The two-view contract is sigmoid + sigmoid. scoring_func is
                 # guaranteed to be "sigmoid" here (validated above and in
@@ -1296,7 +1301,7 @@ class TopKRouter(StandardMoERouter):
                     self.weight,
                     True,
                     self.config.moe_router_force_load_balancing,
-                    getattr(self.config, "dw_p2p_overlap", False),
+                    dw_overlap_enabled(self.config, "moe_router_gate"),
                 )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)

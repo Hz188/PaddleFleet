@@ -19,10 +19,36 @@ import os
 from itertools import chain
 
 import paddle
+from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+    RecomputeStore,
+)
 
 logger = logging.getLogger(__name__)
 
 g_has_print_recovery_log = False
+
+
+def install_recompute_p2p_overlap(config):
+    """Let the pp scheduler recompute the next backward chunk inside a p2p window.
+
+    Reads ``config.p2p_overlap_recompute`` onto the process-global
+    ``RecomputeStore``, which is where the scheduler looks; off means no span
+    ever registers. Idempotent, so it is safe to call from every layer's
+    constructor.
+    """
+    enabled = bool(getattr(config, "p2p_overlap_recompute", False))
+    if enabled and config.recompute_granularity != "selective":
+        raise ValueError(
+            "p2p_overlap_recompute needs recompute_granularity='selective', "
+            f"got {config.recompute_granularity!r}: there are no recompute "
+            "spans to hoist otherwise"
+        )
+    if enabled and getattr(config, "pipeline_model_parallel_size", 1) <= 1:
+        raise ValueError(
+            "p2p_overlap_recompute needs pipeline_model_parallel_size > 1: "
+            "without pipeline parallel there is no p2p window to fill"
+        )
+    RecomputeStore.enabled = enabled
 
 
 def keep_indexer_grad_path(hidden_states, config):

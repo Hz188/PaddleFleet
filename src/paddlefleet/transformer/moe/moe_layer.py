@@ -43,6 +43,11 @@ from paddlefleet import utils
 from paddlefleet.recompute_utils import need_recompute_in_first_n
 from paddlefleet.transformer.activations import situ
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
+from paddlefleet.transformer.dw_overlap import (
+    deferrable_linear_bare,
+    install_sonic_moe_dw_deferral,
+)
+from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
@@ -178,7 +183,16 @@ class MoELayer(nn.Layer):
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.use_ue8m0 = config.use_ue8m0
-        self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
+        # Two independent expert deferral points. `p2p_overlap` reaches the
+        # expert w1 (up_gate_proj) weight grad; `p2p_overlap_down` reaches w2
+        # (down_proj), which additionally costs activation memory, so it is a
+        # separate opt-in.
+        self.p2p_overlap = dw_overlap_enabled(
+            config, "moe_expert_up_gate_proj"
+        )
+        self.p2p_overlap_down = dw_overlap_enabled(
+            config, "moe_expert_down_proj"
+        )
         self.using_sonic_moe = self.config.using_sonic_moe
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
@@ -207,6 +221,9 @@ class MoELayer(nn.Layer):
                     "paddlefleet_ops.sonicmoe"
                 ]
             )
+            # SonicMoE's experts have their own two deferral points; the
+            # `p2p_overlap*` flags above only reach the fp8_utils expert path.
+            install_sonic_moe_dw_deferral(config)
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_deep_gemm = config.moe_deep_gemm
 
@@ -825,7 +842,9 @@ class MoELayer(nn.Layer):
             and self.moe_allgather_gate_overlap
         ):
             if self.use_latent_moe:
-                self._latent_hidden = self.fc1_latent_proj(hidden_states)
+                self._latent_hidden = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc1_latent_proj, hidden_states
+            )
                 self.token_dispatcher.pre_allgather(self._latent_hidden)
             else:
                 self._latent_hidden = None
@@ -899,7 +918,9 @@ class MoELayer(nn.Layer):
             hidden_states = self._latent_hidden
             self._latent_hidden = None
         else:
-            hidden_states = self.fc1_latent_proj(hidden_states)
+            hidden_states = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc1_latent_proj, hidden_states
+            )
         return hidden_states
 
     # MoE forward: dispatch -> permute -> compute ->unpermute -> combine
@@ -913,7 +934,9 @@ class MoELayer(nn.Layer):
     ):
         # Latent MoE: project hidden_states to latent space before dispatch
         if self.use_latent_moe:
-            hidden_states = self.fc1_latent_proj(hidden_states)
+            hidden_states = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc1_latent_proj, hidden_states
+            )
 
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
@@ -937,7 +960,10 @@ class MoELayer(nn.Layer):
         if self.use_latent_moe:
             if self.latent_norm is not None:
                 hidden_states = self.latent_norm(hidden_states)
-            hidden_states = self.fc2_latent_proj(hidden_states)
+            hidden_states = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc2_latent_proj, hidden_states
+            )
+
 
         return hidden_states
 
@@ -1013,7 +1039,8 @@ class MoELayer(nn.Layer):
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
                     use_ue8m0=self.use_ue8m0,
-                    dw_p2p_overlap=self.dw_p2p_overlap,
+                    p2p_overlap=self.p2p_overlap,
+                    p2p_overlap_down=self.p2p_overlap_down,
                     clamp_value=self.config.activation_func_clamp_value,
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
                     use_accuracy_compatible=getattr(
@@ -1032,7 +1059,10 @@ class MoELayer(nn.Layer):
         if self.use_latent_moe:
             if self.latent_norm is not None:
                 hidden_states = self.latent_norm(hidden_states)
-            hidden_states = self.fc2_latent_proj(hidden_states)
+            hidden_states = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc2_latent_proj, hidden_states
+            )
+
 
         return hidden_states
 
@@ -1071,7 +1101,8 @@ class MoELayer(nn.Layer):
             use_bf16_gemm_weight_grad=not self.fp8_wgrad,
             fp8_dispatched_handle=fp8_dispatched_handle,
             is_first_fwd=is_first_fwd,
-            dw_p2p_overlap=self.dw_p2p_overlap,
+            p2p_overlap=self.p2p_overlap,
+            p2p_overlap_down=self.p2p_overlap_down,
             clamp_value=self.config.activation_func_clamp_value,
             use_accuracy_compatible=getattr(
                 self.config, "use_accuracy_compatible", False
@@ -1081,7 +1112,9 @@ class MoELayer(nn.Layer):
     def dispatch_preprocess(self, args):
         hidden_states, token_probs, token_indices = args
         if self.use_latent_moe:
-            hidden_states = self.fc1_latent_proj(hidden_states)
+            hidden_states = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc1_latent_proj, hidden_states
+            )
         assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
         hidden_states = self.token_dispatcher.dispatch_preprocess_overlap(
             hidden_states, token_probs, token_indices
@@ -1174,7 +1207,8 @@ class MoELayer(nn.Layer):
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
                     use_ue8m0=self.use_ue8m0,
-                    dw_p2p_overlap=self.dw_p2p_overlap,
+                    p2p_overlap=self.p2p_overlap,
+                    p2p_overlap_down=self.p2p_overlap_down,
                     clamp_value=self.config.activation_func_clamp_value,
                     use_accuracy_compatible=getattr(
                         self.config, "use_accuracy_compatible", False
@@ -1207,7 +1241,9 @@ class MoELayer(nn.Layer):
         if self.use_latent_moe:
             if self.latent_norm is not None:
                 hidden_states = self.latent_norm(hidden_states)
-            hidden_states = self.fc2_latent_proj(hidden_states)
+            hidden_states = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc2_latent_proj, hidden_states
+            )
         if self.training and self.router_aux_loss_coef and aux_loss is not None:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
@@ -1344,7 +1380,9 @@ class MoELayer(nn.Layer):
                 reshaped_input = expert_input
             # Latent MoE: project to latent space before single-card MoE
             if self.use_latent_moe:
-                reshaped_input = self.fc1_latent_proj(reshaped_input)
+                reshaped_input = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc1_latent_proj, reshaped_input
+            )
             if self.moe_expert_fusion:
                 output = self._forward_single_card_grouped_gemm_moe(
                     reshaped_input, mask, probs, topk_indices, topk_weights
@@ -1357,7 +1395,9 @@ class MoELayer(nn.Layer):
             if self.use_latent_moe:
                 if self.latent_norm is not None:
                     output = self.latent_norm(output)
-                output = self.fc2_latent_proj(output)
+                output = deferrable_linear_bare(
+                self.config, "moe_latent_proj", self.fc2_latent_proj, output
+            )
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
 

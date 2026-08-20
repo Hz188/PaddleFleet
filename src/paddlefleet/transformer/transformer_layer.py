@@ -38,6 +38,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     has_recovered,
+    install_recompute_p2p_overlap,
     keep_indexer_grad_path,
     need_full_recompute,
     need_recompute_in_block,
@@ -234,6 +235,10 @@ class TransformerLayer(nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
         self.config = config
+        # Every recompute span this layer registers has to be visible to the pp
+        # scheduler, so install here rather than in one subclass: the base is the
+        # only place every transformer variant passes through.
+        install_recompute_p2p_overlap(config)
         TransformerLayer._gpt_model_use_experimental_version = (
             config.gpt_model_use_experimental_version
         )

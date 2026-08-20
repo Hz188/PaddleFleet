@@ -39,6 +39,78 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# The weight-grad (dW) computations that can be deferred to cover p2p
+# communication. Each name is <subsystem>_<the projection whose weight grad is
+# deferred>, so it maps onto an identifier that exists in the model code:
+#   attn_q_proj             -> attention query projection, including both
+#                              low-rank factors when it is LoRA-factored
+#                              (q_a_proj/q_b_proj, linear_q_down/up_proj)
+#   attn_kv_proj            -> attention key/value projection. K and V are not
+#                              separable here: both MLA and the dsv4 hybrid
+#                              attention produce them from one shared
+#                              projection, so there is no attn_k/attn_v choice
+#   attn_out_proj           -> attention output projection (o_proj)
+#   attn_o_group_proj       -> dsv4 hybrid's grouped output projection
+#                              (linear_o_group_proj), a Triton grouped GEMM.
+#                              Largest single dW here, but also the largest
+#                              memory cost: the queued thunk pins x + dy per
+#                              layer per in-flight microbatch
+#   attn_gate_proj          -> gated-attention gate projection
+#   attn_compressor_proj    -> CSA/HCA compressor's linear_wkv + linear_wgate
+#   moe_router_gate         -> MoE router gate matmul
+#   moe_latent_proj         -> latent-MoE fc1_latent_proj + fc2_latent_proj
+#   moe_expert_up_gate_proj -> MoE routed expert up_gate_proj (a.k.a. w1)
+#   moe_expert_down_proj    -> MoE routed expert down_proj (a.k.a. w2). Costs
+#                              extra activation memory, see
+#                              fp8_utils.backward_impl_fp8
+#                              Both apply to the fp8_utils expert path and do
+#                              nothing when using_sonic_moe routes the experts
+#                              to SonicMoE -- use the two points below instead
+#   moe_sonic_expert_up_gate_proj / moe_sonic_expert_down_proj
+#                           -> SonicMoE routed expert w1 / w2. By far the
+#                              largest single dW blocks (topk expands the
+#                              GEMM's K), but the queued thunk pins the
+#                              column-major fp8 activations it reads, so each
+#                              costs a few hundred MiB per layer per in-flight
+#                              microbatch. fp8-wgrad path only
+#   moe_shared_expert_up_gate_proj / moe_shared_expert_down_proj
+#                           -> the shared expert's MLP. Its backward already
+#                              overlaps the combine collective, so selecting
+#                              these moves work between windows rather than
+#                              creating fill from nothing -- measure separately
+#   mtp_e_proj / mtp_h_proj -> multi-token-prediction input projections; one
+#                              instance, last stage only
+P2P_OVERLAP_DW_CALC_CHOICES = (
+    "attn_q_proj",
+    "attn_kv_proj",
+    "attn_out_proj",
+    "attn_o_group_proj",
+    "attn_gate_proj",
+    "attn_compressor_proj",
+    "moe_router_gate",
+    "moe_latent_proj",
+    "moe_expert_up_gate_proj",
+    "moe_expert_down_proj",
+    "moe_sonic_expert_up_gate_proj",
+    "moe_sonic_expert_down_proj",
+    "moe_shared_expert_up_gate_proj",
+    "moe_shared_expert_down_proj",
+    "mtp_e_proj",
+    "mtp_h_proj",
+)
+
+
+def dw_overlap_enabled(config, point: str) -> bool:
+    """Whether `point`'s weight grad should be deferred to cover p2p comm.
+
+    Driven solely by config.p2p_overlap_dw_calc, the list of selected points.
+    Reads through getattr because callers include plain model configs that do
+    not carry the field.
+    """
+    selected = getattr(config, "p2p_overlap_dw_calc", None)
+    return bool(selected) and point in selected
+
+
 
 @dataclass
 class TransformerConfig(ModelParallelConfig):
@@ -789,8 +861,33 @@ class TransformerConfig(ModelParallelConfig):
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
 
-    dw_p2p_overlap: bool = False
-    """Whether to overlap p2p communication and matmul kernel in pp parallel on Blackwell."""
+    p2p_overlap_dw_calc: list[str] | None = None
+    """Which weight-grad (dW) computations to defer so they can cover p2p communication.
+
+    None or [] disables the feature. Each entry names one deferral point; see
+    P2P_OVERLAP_DW_CALC_CHOICES. Selecting points individually lets a model that
+    regresses on one of them keep the others. Requires a pp scheduler that
+    flushes and pops WeightGradStore, tensor_model_parallel_size == 1 and
+    pipeline_model_parallel_size > 1.
+    """
+
+    p2p_overlap_recompute: bool = False
+    """Recompute the next backward chunk's spans inside an exposed p2p window.
+
+    Companion to p2p_overlap_dw_calc, for when the deferred dW does not fill the
+    window. A selective-recompute span replays its forward from inputs saved
+    during the original forward and never reads the incoming activation
+    gradient, so running it early is pure relocation.
+
+    No knob beyond on/off on purpose: only the chunk whose backward comes next is
+    ever hoisted, so at most one chunk's discarded activations are resident early
+    and the very next backward consumes them. If that chunk has no spans (an
+    EmptyLayer chunk) nothing runs -- those bubbles are a partitioning problem,
+    not something filler can reach.
+
+    Requires recompute_granularity == "selective" and
+    pipeline_model_parallel_size > 1.
+    """
 
     use_ue8m0: bool = False
     """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
@@ -1639,6 +1736,20 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+
+        if self.p2p_overlap_dw_calc is not None:
+            if isinstance(self.p2p_overlap_dw_calc, str):
+                self.p2p_overlap_dw_calc = [self.p2p_overlap_dw_calc]
+            unknown = [
+                p
+                for p in self.p2p_overlap_dw_calc
+                if p not in P2P_OVERLAP_DW_CALC_CHOICES
+            ]
+            assert not unknown, (
+                f"unknown p2p_overlap_dw_calc entries {unknown}, "
+                f"expected a subset of {list(P2P_OVERLAP_DW_CALC_CHOICES)}"
+            )
+
         if self.mtp_shared_last_layer:
             # When MTP reuses the last backbone TransformerLayer's parameters,
             # the MTP transformer block must have an identical structure to the
