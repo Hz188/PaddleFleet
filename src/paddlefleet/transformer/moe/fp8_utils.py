@@ -20,7 +20,6 @@ import paddle
 import paddle.nn.functional as F
 from paddle.base.framework import EagerParamBase
 
-from paddlefleet.transformer.dw_overlap import nvtx_tag_dw
 from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
     fused_swiglu_scale_forward,
@@ -2253,9 +2252,7 @@ class ExpertsGroupGemmContiguousNode:
                     if p2p_overlap:
                         WeightGradStore.enabled = True
                         WeightGradStore.put(
-                            nvtx_tag_dw(
-                                "moe_expert",
-                                partial(
+                            partial(
                                 _compute_weight_grad,
                                 x,
                                 dy,
@@ -2264,7 +2261,6 @@ class ExpertsGroupGemmContiguousNode:
                                 self.tokens_per_expert,
                                 self.tokens_per_expert_tensor,
                                 p2p_overlap,
-                            ),
                             )
                         )
                         WeightGradStore.enabled = False
@@ -2309,9 +2305,7 @@ class ExpertsGroupGemmContiguousNode:
                     if p2p_overlap:
                         WeightGradStore.enabled = True
                         WeightGradStore.put(
-                            nvtx_tag_dw(
-                                "moe_expert",
-                                partial(
+                            partial(
                                 _compute_weight_grad,
                                 x,
                                 dy,
@@ -2320,7 +2314,6 @@ class ExpertsGroupGemmContiguousNode:
                                 self.tokens_per_expert,
                                 self.tokens_per_expert_tensor,
                                 p2p_overlap,
-                            ),
                             )
                         )
                         WeightGradStore.enabled = False

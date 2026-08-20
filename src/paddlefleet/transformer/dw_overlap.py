@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from functools import partial
 
-import nvtx
 import paddle
 from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
@@ -38,30 +37,12 @@ __all__ = [
     "deferrable_linear_bare",
     "deferred_grouped_dw_accumulator",
     "install_sonic_moe_dw_deferral",
-    "nvtx_tag_dw",
 ]
 
 SONIC_MOE_DW_POINTS = (
     "moe_sonic_expert_up_gate_proj",
     "moe_sonic_expert_down_proj",
 )
-
-
-def nvtx_tag_dw(point, fn):
-    """Tag a queued dW thunk so nsys shows which point is running.
-
-    The range opens when the scheduler pops it, i.e. inside the p2p window --
-    that is the interval we actually care about on the timeline.
-    """
-
-    def _run():
-        nvtx.push_range(f"dW_run/{point}", color="orange")
-        try:
-            return fn()
-        finally:
-            nvtx.pop_range()
-
-    return _run
 
 
 def _accumulate_into_main_grad(param, dw):
@@ -100,10 +81,7 @@ def deferred_grouped_dw_accumulator(config, point, param):
     def _accumulate(compute_dw):
         WeightGradStore.enabled = True
         WeightGradStore.put(
-            nvtx_tag_dw(
-                point,
-                lambda: _accumulate_into_main_grad(param, compute_dw()),
-            )
+            lambda: _accumulate_into_main_grad(param, compute_dw())
         )
         WeightGradStore.enabled = False
 
@@ -123,9 +101,7 @@ def _defer_sonic_moe_wgrad(points, point, weight, run_wgrad):
     if point not in points:
         return False
     WeightGradStore.enabled = True
-    WeightGradStore.put(
-        nvtx_tag_dw(point, partial(_run_sonic_moe_wgrad, weight, run_wgrad))
-    )
+    WeightGradStore.put(partial(_run_sonic_moe_wgrad, weight, run_wgrad))
     WeightGradStore.enabled = False
     return True
 
@@ -172,10 +148,8 @@ class DeferredWeightGradLinear(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, weight, point=None):
+    def forward(ctx, x, weight):
         ctx.save_for_backward(x, weight)
-        # Only used to label the nvtx ranges so nsys can tell the points apart.
-        ctx.point = point
         # Bit-exact with Column/RowParallelLinear at mp == 1, no bias:
         # F.linear(x, weight) = x @ weight, weight shape: [in, out]
         return paddle.nn.functional.linear(x, weight)
@@ -183,7 +157,6 @@ class DeferredWeightGradLinear(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, out_grad):
         x, weight = ctx.saved_tensor()
-        point = ctx.point or "unknown"
 
         def _compute_weight_grad(x, out_grad, weight):
             with paddle.amp.auto_cast(False):
@@ -207,28 +180,19 @@ class DeferredWeightGradLinear(paddle.autograd.PyLayer):
             if hasattr(weight, "_apply_backward_hook"):
                 weight._apply_backward_hook()
 
-        # dW 分离点：dx 立刻算，dW 入队。这一段在 nsys 上是很短的一条，
-        # 标出来是为了看清"在哪里把 dW 摘出去的"。
-        nvtx.push_range(f"dW_defer/{point}", color="green")
-        try:
-            dx = paddle.matmul(out_grad, weight, transpose_y=True)
+        dx = paddle.matmul(out_grad, weight, transpose_y=True)
 
-            if not weight.stop_gradient:
-                WeightGradStore.enabled = True
-                WeightGradStore.put(
-                    nvtx_tag_dw(
-                        point,
-                        partial(
-                            _compute_weight_grad,
-                            x.detach(),
-                            out_grad.detach(),
-                            weight,
-                        ),
-                    )
+        if not weight.stop_gradient:
+            WeightGradStore.enabled = True
+            WeightGradStore.put(
+                partial(
+                    _compute_weight_grad,
+                    x.detach(),
+                    out_grad.detach(),
+                    weight,
                 )
-                WeightGradStore.enabled = False
-        finally:
-            nvtx.pop_range()
+            )
+            WeightGradStore.enabled = False
 
         return dx, None
 
@@ -257,7 +221,7 @@ def deferrable_linear(config, point, layer, x):
     layer carries a bias.
     """
     if _can_defer(config, point, layer):
-        return DeferredWeightGradLinear.apply(x, layer.weight, point), None
+        return DeferredWeightGradLinear.apply(x, layer.weight), None
     return layer(x)
 
 
@@ -268,5 +232,5 @@ def deferrable_linear_bare(config, point, layer, x):
     Fleet projection layers use.
     """
     if _can_defer(config, point, layer):
-        return DeferredWeightGradLinear.apply(x, layer.weight, point)
+        return DeferredWeightGradLinear.apply(x, layer.weight)
     return layer(x)
