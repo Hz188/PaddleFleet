@@ -37,7 +37,6 @@ from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.transformer.dw_overlap import nvtx_tag_dw
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddle._C_ops import matmul_grad
 from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
@@ -229,14 +228,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             else:
                 WeightGradStore.enabled = True
                 WeightGradStore.put(
-                    nvtx_tag_dw(
-                        "moe_router_gate",
-                        partial(
-                            _compute_weight_grad,
-                            x_cast.detach(),
-                            y_grad.detach(),
-                            w,
-                        ),
+                    partial(
+                        _compute_weight_grad,
+                        x_cast.detach(),
+                        y_grad.detach(),
+                        w,
                     )
                 )
                 WeightGradStore.enabled = False
