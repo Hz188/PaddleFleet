@@ -166,12 +166,13 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, w, p2p_overlap=False, use_accuracy_compatible=False):
+    def forward(ctx, x, w, defer_dw=False, use_accuracy_compatible=False):
         """
         forward
         """
-        ctx.p2p_overlap = p2p_overlap
+        ctx.defer_dw = defer_dw
         ctx.use_accuracy_compatible = use_accuracy_compatible
+
 
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
@@ -216,7 +217,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             if hasattr(weight, "_apply_backward_hook"):
                 weight._apply_backward_hook()
 
-        if ctx.p2p_overlap:
+        if ctx.defer_dw:
             x_cast = x.cast(ctx.dtype)
             w_cast = w.cast(ctx.dtype)
 
@@ -272,14 +273,13 @@ def gate_detach_matmul(
     weight,
     use_fuse,
     moe_router_force_load_balancing=False,
-    p2p_overlap=False,
+    defer_dw=False,
     use_accuracy_compatible=False,
 ):
     if use_fuse:
         score = FusedGateDetachMatmul.apply(
-            x, weight, p2p_overlap, use_accuracy_compatible
+            x, weight, defer_dw, use_accuracy_compatible
         )
-
     else:
         x = x.cast(paddle.float32)
         score = F.linear(x, weight)
@@ -403,7 +403,7 @@ class StandardMoERouter(nn.Layer):
         if self.moe_split_feature_routing:
             # Same layout / init as ``self.weight`` ([num_experts, hidden_size])
             # so the two views are symmetric and the projection can reuse the
-            # fused gate matmul (force-load-balancing and p2p_overlap paths
+            # fused gate matmul (force-load-balancing and defer_dw paths
             # included). ``self.weight`` is reused as the first view, so no
             # extra gate is wasted. The scoring_func == "sigmoid" contract is
             # checked later in set_layer_number(), once we know whether this is
@@ -1626,7 +1626,7 @@ class TopKRouter(StandardMoERouter):
                 # per-expert scores. View 0 reuses the existing self.weight
                 # gate, view 1 uses the new self.weight_1 projection. Both
                 # reuse the fused gate matmul so they share the
-                # force-load-balancing and p2p_overlap paths.
+                # force-load-balancing and defer_dw paths.
                 logits_0 = gate_detach_matmul(
                     input,
                     self.weight,

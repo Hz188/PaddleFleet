@@ -219,14 +219,14 @@ class MoELayer(nn.Layer):
         self.use_ue8m0 = config.use_ue8m0
         self.use_w4a8 = config.use_w4a8
         self.use_w4a8_fused_quant = config.use_w4a8_fused_quant
-        # Two independent expert deferral points. `p2p_overlap` reaches the
-        # expert w1 (up_gate_proj) weight grad; `p2p_overlap_down` reaches w2
-        # (down_proj), which additionally costs activation memory, so it is a
-        # separate opt-in.
-        self.p2p_overlap = dw_overlap_enabled(
+        # Two independent expert deferral points, one per expert weight:
+        #   defer_expert_up_gate_dw -> w1 (up_gate_proj) weight grad
+        #   defer_expert_down_dw    -> w2 (down_proj) weight grad, which
+        #     additionally costs activation memory, so it is a separate opt-in.
+        self.defer_expert_up_gate_dw = dw_overlap_enabled(
             config, "moe_expert_up_gate_proj"
         )
-        self.p2p_overlap_down = dw_overlap_enabled(
+        self.defer_expert_down_dw = dw_overlap_enabled(
             config, "moe_expert_down_proj"
         )
 
@@ -252,8 +252,8 @@ class MoELayer(nn.Layer):
                     "paddlefleet_ops.sonicmoe"
                 ]
             )
-            # SonicMoE's experts have their own two deferral points; the
-            # `p2p_overlap*` flags above only reach the fp8_utils expert path.
+            # SonicMoE's experts have their own two deferral points; the two
+            # defer_expert_*_dw flags above only reach the fp8_utils path.
             install_sonic_moe_dw_deferral(config)
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_deep_gemm = config.moe_deep_gemm
@@ -1226,8 +1226,8 @@ class MoELayer(nn.Layer):
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
                     use_ue8m0=self.use_ue8m0,
-                    p2p_overlap=self.p2p_overlap,
-                    p2p_overlap_down=self.p2p_overlap_down,
+                    defer_expert_up_gate_dw=self.defer_expert_up_gate_dw,
+                    defer_expert_down_dw=self.defer_expert_down_dw,
                     clamp_value=self.config.activation_func_clamp_value,
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
                     use_accuracy_compatible=getattr(
@@ -1352,8 +1352,8 @@ class MoELayer(nn.Layer):
             use_bf16_gemm_weight_grad=not self.fp8_wgrad,
             fp8_dispatched_handle=fp8_dispatched_handle,
             is_first_fwd=is_first_fwd,
-            p2p_overlap=self.p2p_overlap,
-            p2p_overlap_down=self.p2p_overlap_down,
+            defer_expert_up_gate_dw=self.defer_expert_up_gate_dw,
+            defer_expert_down_dw=self.defer_expert_down_dw,
             clamp_value=self.config.activation_func_clamp_value,
             use_accuracy_compatible=getattr(
                 self.config, "use_accuracy_compatible", False
@@ -1458,8 +1458,8 @@ class MoELayer(nn.Layer):
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
                     use_ue8m0=self.use_ue8m0,
-                    p2p_overlap=self.p2p_overlap,
-                    p2p_overlap_down=self.p2p_overlap_down,
+                    defer_expert_up_gate_dw=self.defer_expert_up_gate_dw,
+                    defer_expert_down_dw=self.defer_expert_down_dw,
                     clamp_value=self.config.activation_func_clamp_value,
                     use_accuracy_compatible=getattr(
                         self.config, "use_accuracy_compatible", False

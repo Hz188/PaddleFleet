@@ -14,12 +14,12 @@
 # limitations under the License.
 """
 Unit tests for the p2p_overlap_dw_calc deferral points across:
-  1. FusedGateDetachMatmul (moe_router.py) - p2p_overlap=False/True branches
-  2. gate_detach_matmul (moe_router.py) - passes p2p_overlap through
+  1. FusedGateDetachMatmul (moe_router.py) - defer_dw=False/True branches
+  2. gate_detach_matmul (moe_router.py) - passes defer_dw through
   3. TopKRouter.forward (moe_router.py) - reads config.p2p_overlap_dw_calc
   4. DeferredWeightGradLinear (dw_overlap.py) - deferred-dW stand-in for a bias-free linear
   5. MultiLatentAttention.forward - "attn_out_proj" selects DeferredWeightGradLinear
-  6. MlpNode / FusionMoePyLayer - p2p_overlap pass-through
+  6. MlpNode / FusionMoePyLayer - defer_dw pass-through
   7. MoELayer.__init__ - reads config.p2p_overlap_dw_calc
   8. deferrable_linear - each attention point is independently selectable
 
@@ -198,11 +198,11 @@ def _make_mla(overlap_out_proj=False, use_bias=False, **cfg_kwargs):
 
 
 # ============================================================
-# Test 1: FusedGateDetachMatmul – no-overlap path (p2p_overlap=False)
+# Test 1: FusedGateDetachMatmul – no-overlap path (defer_dw=False)
 # ============================================================
 class TestFusedGateDetachMatmulNoOverlap(unittest.TestCase):
     """
-    When p2p_overlap=False the backward should run the classic
+    When defer_dw=False the backward should run the classic
     matmul_grad path and return (x_grad, w_grad) directly.
 
     Note: FusedGateDetachMatmul.forward applies w = w.T internally,
@@ -257,11 +257,11 @@ class TestFusedGateDetachMatmulNoOverlap(unittest.TestCase):
 
 
 # ============================================================
-# Test 2: FusedGateDetachMatmul – overlap path (p2p_overlap=True)
+# Test 2: FusedGateDetachMatmul – overlap path (defer_dw=True)
 # ============================================================
 class TestFusedGateDetachMatmulOverlap(unittest.TestCase):
     """
-    When p2p_overlap=True:
+    When defer_dw=True:
       - x_grad is computed immediately
       - w_grad is deferred to WeightGradStore.cache (returns None for w_grad)
       - After WeightGradStore.flush() + pop(), weight.main_grad is updated
@@ -272,7 +272,7 @@ class TestFusedGateDetachMatmulOverlap(unittest.TestCase):
 
     def test_overlap_defers_w_grad_to_cache(self):
         """
-        p2p_overlap=True: backward puts dw computation into WeightGradStore.cache.
+        defer_dw=True: backward puts dw computation into WeightGradStore.cache.
         The weight needs main_grad because the overlap path requires it.
         w shape [E, D] matching TopKRouter.weight convention.
         """
@@ -369,13 +369,13 @@ class TestFusedGateDetachMatmulOverlap(unittest.TestCase):
 # Test 3: gate_detach_matmul wrapper function
 # ============================================================
 class TestGateDetachMatmul(unittest.TestCase):
-    """gate_detach_matmul must pass p2p_overlap through to FusedGateDetachMatmul."""
+    """gate_detach_matmul must pass defer_dw through to FusedGateDetachMatmul."""
 
     def setUp(self):
         WeightGradStore.clear()
 
     def test_fuse_true_no_overlap(self):
-        """use_fuse=True, p2p_overlap=False -> standard fused path, w_grad returned.
+        """use_fuse=True, defer_dw=False -> standard fused path, w_grad returned.
         w shape [E, D] as in TopKRouter.weight."""
         print("\n[gate_detach_matmul] fuse=True, no-overlap")
         B, D, E = 4, 8, 4
@@ -385,7 +385,7 @@ class TestGateDetachMatmul(unittest.TestCase):
         )  # [E, D] like TopKRouter.weight
         x.stop_gradient = False
         w.stop_gradient = False
-        out = gate_detach_matmul(x, w, use_fuse=True, p2p_overlap=False)
+        out = gate_detach_matmul(x, w, use_fuse=True, defer_dw=False)
         out.sum().backward()
         self.assertIsNotNone(
             w.grad, "w.grad must exist in no-overlap fused path"
@@ -395,7 +395,7 @@ class TestGateDetachMatmul(unittest.TestCase):
         )
 
     def test_fuse_true_overlap_defers(self):
-        """use_fuse=True, p2p_overlap=True -> WeightGradStore.cache receives dw.
+        """use_fuse=True, defer_dw=True -> WeightGradStore.cache receives dw.
         w shape [E, D] as in TopKRouter.weight."""
         print("\n[gate_detach_matmul] fuse=True, overlap")
         B, D, E = 4, 8, 4
@@ -403,7 +403,7 @@ class TestGateDetachMatmul(unittest.TestCase):
         w = make_weight_with_main_grad([E, D])  # [E, D] like TopKRouter.weight
         x.stop_gradient = False
         w.stop_gradient = False
-        out = gate_detach_matmul(x, w, use_fuse=True, p2p_overlap=True)
+        out = gate_detach_matmul(x, w, use_fuse=True, defer_dw=True)
         out.sum().backward()
         self.assertGreater(
             len(WeightGradStore.cache),
@@ -427,7 +427,7 @@ class TestGateDetachMatmul(unittest.TestCase):
         )  # F.linear(x,w)=x@w needs [D,E]
         x.stop_gradient = False
         w.stop_gradient = False
-        out = gate_detach_matmul(x, w, use_fuse=False, p2p_overlap=False)
+        out = gate_detach_matmul(x, w, use_fuse=False, defer_dw=False)
         self.assertIsNotNone(out)
         self.assertEqual(list(out.shape), [B, E])
         out.sum().backward()
@@ -436,7 +436,7 @@ class TestGateDetachMatmul(unittest.TestCase):
 
 
 # ============================================================
-# Test 4: TopKRouter reads p2p_overlap from config
+# Test 4: TopKRouter reads defer_dw from config
 # ============================================================
 class TestTopKRouterDwP2POverlap(unittest.TestCase):
     """TopKRouter.forward must read config.p2p_overlap_dw_calc and pass it to gate_detach_matmul."""
@@ -471,8 +471,8 @@ class TestTopKRouterDwP2POverlap(unittest.TestCase):
         WeightGradStore.clear()
 
     def test_router_forward_no_overlap(self):
-        """Router forward with p2p_overlap=False should complete normally."""
-        print("\n[TopKRouter] p2p_overlap=False forward pass")
+        """Router forward with defer_dw=False should complete normally."""
+        print("\n[TopKRouter] defer_dw=False forward pass")
         from paddlefleet.transformer.moe.moe_router import TopKRouter
 
         with patch(
@@ -484,11 +484,11 @@ class TestTopKRouterDwP2POverlap(unittest.TestCase):
             hidden = paddle.randn([2, 4, 64])
             out = router(hidden)
             self.assertIsNotNone(out)
-            print("[TopKRouter] p2p_overlap=False forward OK")
+            print("[TopKRouter] defer_dw=False forward OK")
 
     def test_router_forward_overlap_defers_dw(self):
-        """Router forward with p2p_overlap=True: gate dw deferred to WeightGradStore."""
-        print("\n[TopKRouter] p2p_overlap=True forward + backward pass")
+        """Router forward with defer_dw=True: gate dw deferred to WeightGradStore."""
+        print("\n[TopKRouter] defer_dw=True forward + backward pass")
         from paddlefleet.transformer.moe.moe_router import TopKRouter
 
         with patch(
@@ -522,7 +522,7 @@ class TestTopKRouterDwP2POverlap(unittest.TestCase):
                 "WeightGradStore.cache should be non-empty in overlap mode",
             )
             print(
-                f"[TopKRouter] p2p_overlap=True WeightGradStore.cache len="
+                f"[TopKRouter] defer_dw=True WeightGradStore.cache len="
                 f"{len(WeightGradStore.cache)} OK"
             )
         WeightGradStore.clear()
@@ -806,11 +806,11 @@ class TestMoELayerP2POverlapInit(unittest.TestCase):
 
 
 # ============================================================
-# Test 9: FusionMoePyLayer passes p2p_overlap to MlpNode
+# Test 9: FusionMoePyLayer passes defer_dw to MlpNode
 # ============================================================
 class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
     """
-    FusionMoePyLayer.forward passes p2p_overlap to MlpNode which passes it
+    FusionMoePyLayer.forward passes defer_dw to MlpNode which passes it
     to ExpertsGroupGemmContiguousNode. Test both False and True paths.
     """
 
@@ -911,7 +911,7 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
         )
         return hidden_states, scale, probs, indices, tokens_per_expert
 
-    def _run_fusion_layer(self, p2p_overlap=False):
+    def _run_fusion_layer(self, defer_dw=False):
         from paddlefleet.transformer.moe.fusion_layer_utils import (
             FusionMoePyLayer,
         )
@@ -922,7 +922,7 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
         moe_layer = self._make_fake_moe_layer(tokens_per_expert)
 
         print(
-            f"\n[FusionMoePyLayer] running with p2p_overlap={p2p_overlap}"
+            f"\n[FusionMoePyLayer] running with defer_dw={defer_dw}"
         )
         out = FusionMoePyLayer.apply(
             hidden_states,
@@ -938,28 +938,36 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
             use_bf16_gemm_weight_grad=True,
             fp8_dispatched_handle={"scale": scale},
             use_auto_subbatch=False,
-            p2p_overlap=p2p_overlap,
+            defer_expert_up_gate_dw=defer_dw,
         )
         out_grad = paddle.randn_like(out)
         paddle.autograd.backward(out, out_grad)
         print(
-            f"[FusionMoePyLayer] p2p_overlap={p2p_overlap} forward+backward OK"
+            f"[FusionMoePyLayer] defer_dw={defer_dw} forward+backward OK"
         )
         return out
 
     def test_no_overlap_forward_backward(self):
-        """p2p_overlap=False: FusionMoePyLayer forward+backward completes."""
-        out = self._run_fusion_layer(p2p_overlap=False)
+        """defer_dw=False: FusionMoePyLayer forward+backward completes."""
+        out = self._run_fusion_layer(defer_dw=False)
         self.assertIsNotNone(out)
         self.assertEqual(out.shape[-1], self.hidden_size)
         print(f"[FusionMoePyLayer] no-overlap output shape={out.shape} OK")
 
-    def test_overlap_forward_backward(self):
-        """p2p_overlap=True: FusionMoePyLayer forward+backward completes."""
-        out = self._run_fusion_layer(p2p_overlap=True)
-        self.assertIsNotNone(out)
-        self.assertEqual(out.shape[-1], self.hidden_size)
-        print(f"[FusionMoePyLayer] overlap output shape={out.shape} OK")
+    def test_deferral_rejected_without_deep_gemm(self):
+        """Requesting deferral on the non-deep_gemm path must raise.
+
+        This fake layer runs with moe_deep_gemm=False, where
+        bf16_weight_grad has no WeightGradStore branch, so honouring the
+        request is impossible. Before the guard existed this combination was
+        a silent no-op and this test claimed to cover "the overlap path".
+        The real deferral behaviour is covered by TestBf16WeightGrad*, which
+        builds the node with moe_deep_gemm=True.
+        """
+        print("\n[FusionMoePyLayer] deferral without deep_gemm must raise")
+        with self.assertRaisesRegex(AssertionError, "moe_deep_gemm=False"):
+            self._run_fusion_layer(defer_dw=True)
+        print("[FusionMoePyLayer] rejected as expected OK")
 
 
 # ============================================================
@@ -967,7 +975,7 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
 # ============================================================
 class TestFusedGateDetachMatmulOverlapWStopGrad(unittest.TestCase):
     """
-    When p2p_overlap=True and w.stop_gradient=True,
+    When defer_dw=True and w.stop_gradient=True,
     backward should return (x_grad, None) immediately without
     touching WeightGradStore.
     """
@@ -977,7 +985,7 @@ class TestFusedGateDetachMatmulOverlapWStopGrad(unittest.TestCase):
 
     def test_overlap_w_stop_grad_true(self):
         """
-        p2p_overlap=True, w.stop_gradient=True -> x_grad is computed,
+        defer_dw=True, w.stop_gradient=True -> x_grad is computed,
         WeightGradStore.cache stays empty (w_grad skipped entirely).
         Covers moe_router.py lines 129-130.
         """
@@ -1083,14 +1091,14 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
     Tests both:
       - main_grad path (hasattr main_grad): lines 1636-1682
       - no-main_grad path: lines 1684-1724
-      - p2p_overlap=False (direct compute) and p2p_overlap=True (deferred)
+      - defer_dw=False (direct compute) and defer_dw=True (deferred)
     """
 
     def setUp(self):
         paddle.seed(42)
         WeightGradStore.clear()
 
-    def _make_node_and_weight(self, p2p_overlap=False):
+    def _make_node_and_weight(self, defer_dw=False):
         """Build node with moe_deep_gemm=True, mocked deep_gemm."""
         from types import SimpleNamespace
 
@@ -1131,7 +1139,7 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
             moe_deep_gemm=True,
             use_fp8_mlp=True,
             use_bf16_gemm_weight_grad=True,
-            p2p_overlap=p2p_overlap,
+            defer_expert_up_gate_dw=defer_dw,
         )
         node.tokens_per_expert = tokens_per_expert
         node.tokens_per_expert_tensor = tokens_per_expert_tensor
@@ -1151,12 +1159,12 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
 
     def test_main_grad_no_overlap(self):
         """
-        moe_deep_gemm=True, main_grad present, p2p_overlap=False:
+        moe_deep_gemm=True, main_grad present, defer_dw=False:
         _compute_weight_grad runs immediately.
         Covers fp8_utils.py lines 1636-1641, 1644-1645, 1661-1664.
         """
         print("\n[bf16_weight_grad] moe_deep_gemm=True, main_grad, no overlap")
-        node, weights, x, dy = self._make_node_and_weight(p2p_overlap=False)
+        node, weights, x, dy = self._make_node_and_weight(defer_dw=False)
         weights.main_grad = None
 
         with patch(
@@ -1166,7 +1174,7 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
             mock_dg.k_grouped_bf16_gemm_tn_contiguous = (
                 self._patched_k_grouped_gemm
             )
-            node.bf16_weight_grad(dy, x, weights, p2p_overlap=False)
+            node.bf16_weight_grad(dy, x, weights, defer_dw=False)
 
         self.assertIsNotNone(
             weights.main_grad, "main_grad must be initialized after direct call"
@@ -1178,14 +1186,14 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
 
     def test_main_grad_with_overlap(self):
         """
-        moe_deep_gemm=True, main_grad present, p2p_overlap=True:
+        moe_deep_gemm=True, main_grad present, defer_dw=True:
         _compute_weight_grad deferred to WeightGradStore.
         Covers fp8_utils.py lines 1636-1641, 1644-1660.
         """
         print(
-            "\n[bf16_weight_grad] moe_deep_gemm=True, main_grad, p2p_overlap=True"
+            "\n[bf16_weight_grad] moe_deep_gemm=True, main_grad, defer_dw=True"
         )
-        node, weights, x, dy = self._make_node_and_weight(p2p_overlap=True)
+        node, weights, x, dy = self._make_node_and_weight(defer_dw=True)
         weights.main_grad = None
 
         with patch(
@@ -1195,7 +1203,7 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
             mock_dg.k_grouped_bf16_gemm_tn_contiguous = (
                 self._patched_k_grouped_gemm
             )
-            node.bf16_weight_grad(dy, x, weights, p2p_overlap=True)
+            node.bf16_weight_grad(dy, x, weights, defer_dw=True)
 
         self.assertGreater(
             len(WeightGradStore.cache),
@@ -1225,14 +1233,14 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
 
     def test_no_main_grad_no_overlap(self):
         """
-        moe_deep_gemm=True, NO main_grad (weights.grad path), p2p_overlap=False:
+        moe_deep_gemm=True, NO main_grad (weights.grad path), defer_dw=False:
         _compute_weight_grad runs immediately using weights.grad.
         Covers fp8_utils.py lines 1684-1710.
         """
         print(
             "\n[bf16_weight_grad] moe_deep_gemm=True, no main_grad, no overlap"
         )
-        node, weights, x, dy = self._make_node_and_weight(p2p_overlap=False)
+        node, weights, x, dy = self._make_node_and_weight(defer_dw=False)
         if hasattr(weights, "main_grad"):
             del weights.main_grad
 
@@ -1243,7 +1251,7 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
             mock_dg.k_grouped_bf16_gemm_tn_contiguous = (
                 self._patched_k_grouped_gemm
             )
-            node.bf16_weight_grad(dy, x, weights, p2p_overlap=False)
+            node.bf16_weight_grad(dy, x, weights, defer_dw=False)
 
         self.assertIsNotNone(
             weights.grad, "weights.grad must be set after direct computation"
@@ -1252,14 +1260,14 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
 
     def test_no_main_grad_with_overlap(self):
         """
-        moe_deep_gemm=True, NO main_grad, p2p_overlap=True:
+        moe_deep_gemm=True, NO main_grad, defer_dw=True:
         _compute_weight_grad deferred using weights.grad.
         Covers fp8_utils.py lines 1684-1706.
         """
         print(
-            "\n[bf16_weight_grad] moe_deep_gemm=True, no main_grad, p2p_overlap=True"
+            "\n[bf16_weight_grad] moe_deep_gemm=True, no main_grad, defer_dw=True"
         )
-        node, weights, x, dy = self._make_node_and_weight(p2p_overlap=True)
+        node, weights, x, dy = self._make_node_and_weight(defer_dw=True)
         if hasattr(weights, "main_grad"):
             del weights.main_grad
 
@@ -1270,7 +1278,7 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
             mock_dg.k_grouped_bf16_gemm_tn_contiguous = (
                 self._patched_k_grouped_gemm
             )
-            node.bf16_weight_grad(dy, x, weights, p2p_overlap=True)
+            node.bf16_weight_grad(dy, x, weights, defer_dw=True)
 
         self.assertGreater(
             len(WeightGradStore.cache),
@@ -1381,7 +1389,7 @@ class TestBf16WeightGradPerExpertLoop(unittest.TestCase):
         print("\n[bf16_weight_grad per-expert] with main_grad")
         node, weights, x, dy = self._make_node_and_weights(use_main_grad=True)
 
-        node.bf16_weight_grad(dy, x, weights, p2p_overlap=False)
+        node.bf16_weight_grad(dy, x, weights, defer_dw=False)
 
         for i, w in enumerate(weights):
             self.assertIsNotNone(
@@ -1404,7 +1412,7 @@ class TestBf16WeightGradPerExpertLoop(unittest.TestCase):
         )
         node, weights, x, dy = self._make_node_and_weights(use_main_grad=False)
 
-        node.bf16_weight_grad(dy, x, weights, p2p_overlap=False)
+        node.bf16_weight_grad(dy, x, weights, defer_dw=False)
 
         for i, w in enumerate(weights):
             self.assertIsNotNone(
@@ -1416,6 +1424,60 @@ class TestBf16WeightGradPerExpertLoop(unittest.TestCase):
         print(
             f"[bf16_weight_grad per-expert] grad path OK for {len(weights)} experts"
         )
+
+
+# ============================================================
+# Test 10b: expert dW deferral preconditions fail fast
+# ============================================================
+class TestExpertDwDeferralGuard(unittest.TestCase):
+    """`_check_expert_dw_deferral_supported` must reject impossible requests.
+
+    Both points need the deep_gemm weight-grad path (the only branch with a
+    WeightGradStore call); down_proj additionally needs a non-subbatch
+    backward, because the subbatch loop returns out_grad itself as dx and a
+    deferred dw2 still reads out_grad. Silently dropping the request used to
+    hide a real misconfiguration, so these are hard errors now.
+    """
+
+    def _check(self, up_gate, down, deep_gemm, subbatch):
+        from paddlefleet.transformer.moe.fp8_utils import (
+            _check_expert_dw_deferral_supported,
+        )
+
+        _check_expert_dw_deferral_supported(
+            up_gate, down, deep_gemm, subbatch
+        )
+
+    def test_nothing_requested_is_always_fine(self):
+        """No point selected -> unsupported settings must not raise."""
+        self._check(False, False, deep_gemm=False, subbatch=512)
+        print("\n[dw guard] no request + unsupported settings OK")
+
+    def test_supported_combination_passes(self):
+        self._check(True, True, deep_gemm=True, subbatch=None)
+        print("[dw guard] deep_gemm + no subbatch accepts both points OK")
+
+    def test_up_gate_needs_deep_gemm(self):
+        with self.assertRaisesRegex(AssertionError, "moe_deep_gemm=False"):
+            self._check(True, False, deep_gemm=False, subbatch=None)
+        print("[dw guard] up_gate without deep_gemm raises OK")
+
+    def test_down_needs_deep_gemm(self):
+        with self.assertRaisesRegex(AssertionError, "moe_deep_gemm=False"):
+            self._check(False, True, deep_gemm=False, subbatch=None)
+        print("[dw guard] down without deep_gemm raises OK")
+
+    def test_down_rejects_subbatch(self):
+        with self.assertRaisesRegex(
+            AssertionError, "moe_subbatch_token_num_after_dispatch=512"
+        ):
+            self._check(False, True, deep_gemm=True, subbatch=512)
+        print("[dw guard] down with subbatch raises OK")
+
+    def test_up_gate_allows_subbatch(self):
+        """dw1 reads do1, not out_grad: the subbatch alias does not apply."""
+        self._check(True, False, deep_gemm=True, subbatch=512)
+        print("[dw guard] up_gate with subbatch OK")
 
 
 # ============================================================
