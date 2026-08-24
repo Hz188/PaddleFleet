@@ -50,14 +50,14 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
 )
 
-from paddlefleet.transformer.moe.moe_router import (
-    FusedGateDetachMatmul,
-    gate_detach_matmul,
-)
 from paddlefleet.transformer.dw_overlap import (
     DeferredWeightGradLinear,
     deferrable_linear,
     install_sonic_moe_dw_deferral,
+)
+from paddlefleet.transformer.moe.moe_router import (
+    FusedGateDetachMatmul,
+    gate_detach_matmul,
 )
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
@@ -464,7 +464,9 @@ class TestTopKRouterDwP2POverlap(unittest.TestCase):
             context_parallel_size=1,
             sequence_parallel=False,
         )
-        config.p2p_overlap_dw_calc = ["moe_router_gate"] if overlap_gate else None
+        config.p2p_overlap_dw_calc = (
+            ["moe_router_gate"] if overlap_gate else None
+        )
         return config
 
     def setUp(self):
@@ -552,7 +554,9 @@ class TestDeferredWeightGradLinearForward(unittest.TestCase):
             rtol=1e-5,
             err_msg="DeferredWeightGradLinear forward must match F.linear",
         )
-        print(f"[DeferredWeightGradLinear] forward shape={out_overlap.shape} matches OK")
+        print(
+            f"[DeferredWeightGradLinear] forward shape={out_overlap.shape} matches OK"
+        )
 
 
 # ============================================================
@@ -565,7 +569,9 @@ class TestDeferredWeightGradLinearBackward(unittest.TestCase):
         WeightGradStore.clear()
 
     def test_backward_defers_dw(self):
-        print("\n[DeferredWeightGradLinear] backward defers dw to WeightGradStore.cache")
+        print(
+            "\n[DeferredWeightGradLinear] backward defers dw to WeightGradStore.cache"
+        )
         B, S, IN, OUT = 2, 4, 128, 64
         paddle.seed(1)
         x = paddle.randn([B, S, IN])
@@ -595,12 +601,16 @@ class TestDeferredWeightGradLinearBackward(unittest.TestCase):
         WeightGradStore.pop()
         self.assertIsNotNone(weight.main_grad)
         self.assertEqual(list(weight.main_grad.shape), [IN, OUT])
-        print(f"[DeferredWeightGradLinear] main_grad shape={weight.main_grad.shape} OK")
+        print(
+            f"[DeferredWeightGradLinear] main_grad shape={weight.main_grad.shape} OK"
+        )
         WeightGradStore.clear()
 
     def test_backward_dx_matches_reference(self):
         """dx from DeferredWeightGradLinear must match dx from plain F.linear backward."""
-        print("\n[DeferredWeightGradLinear] dx numerical comparison with reference")
+        print(
+            "\n[DeferredWeightGradLinear] dx numerical comparison with reference"
+        )
         B, S, IN, OUT = 2, 3, 32, 16
         paddle.seed(3)
         x_np = np.random.randn(B, S, IN).astype("float32")
@@ -635,7 +645,9 @@ class TestDeferredWeightGradLinearBackward(unittest.TestCase):
 
     def test_backward_dw_matches_reference(self):
         """dw from DeferredWeightGradLinear (after WeightGradStore.pop) must match x_2d.T @ og_2d."""
-        print("\n[DeferredWeightGradLinear] dw numerical comparison with reference")
+        print(
+            "\n[DeferredWeightGradLinear] dw numerical comparison with reference"
+        )
         B, S, IN, OUT = 2, 3, 32, 16
         paddle.seed(5)
         x_np = np.random.randn(B, S, IN).astype("float32")
@@ -703,7 +715,9 @@ class TestMultiLatentAttentionOProj(unittest.TestCase):
 
         if selected and config.use_bias is False:
             print("  -> enter o_proj has overlap (DeferredWeightGradLinear)")
-            output = DeferredWeightGradLinear.apply(core_attn_out, o_proj.weight)
+            output = DeferredWeightGradLinear.apply(
+                core_attn_out, o_proj.weight
+            )
             bias = None
         else:
             print("  -> enter o_proj no overlap (standard o_proj)")
@@ -768,17 +782,13 @@ class TestMoELayerP2POverlapInit(unittest.TestCase):
         """p2p_overlap_dw_calc defaults to None -> nothing is deferred."""
         config = self._config()
         self.assertIsNone(config.p2p_overlap_dw_calc)
-        self.assertFalse(
-            dw_overlap_enabled(config, "moe_expert_up_gate_proj")
-        )
+        self.assertFalse(dw_overlap_enabled(config, "moe_expert_up_gate_proj"))
 
     def test_empty_list_disables(self):
         """An empty list is an explicit "off", not "all points"."""
         config = self._config()
         config.p2p_overlap_dw_calc = []
-        self.assertFalse(
-            dw_overlap_enabled(config, "moe_expert_up_gate_proj")
-        )
+        self.assertFalse(dw_overlap_enabled(config, "moe_expert_up_gate_proj"))
 
     def test_selected_point_enabled(self):
         """Only the listed points are enabled; others stay off."""
@@ -921,9 +931,7 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
         )
         moe_layer = self._make_fake_moe_layer(tokens_per_expert)
 
-        print(
-            f"\n[FusionMoePyLayer] running with defer_dw={defer_dw}"
-        )
+        print(f"\n[FusionMoePyLayer] running with defer_dw={defer_dw}")
         out = FusionMoePyLayer.apply(
             hidden_states,
             probs,
@@ -942,9 +950,7 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
         )
         out_grad = paddle.randn_like(out)
         paddle.autograd.backward(out, out_grad)
-        print(
-            f"[FusionMoePyLayer] defer_dw={defer_dw} forward+backward OK"
-        )
+        print(f"[FusionMoePyLayer] defer_dw={defer_dw} forward+backward OK")
         return out
 
     def test_no_overlap_forward_backward(self):
@@ -1444,9 +1450,7 @@ class TestExpertDwDeferralGuard(unittest.TestCase):
             _check_expert_dw_deferral_supported,
         )
 
-        _check_expert_dw_deferral_supported(
-            up_gate, down, deep_gemm, subbatch
-        )
+        _check_expert_dw_deferral_supported(up_gate, down, deep_gemm, subbatch)
 
     def test_nothing_requested_is_always_fine(self):
         """No point selected -> unsupported settings must not raise."""
@@ -1590,9 +1594,7 @@ class TestDeferralHelpersAreImported(unittest.TestCase):
         "paddlefleet.transformer.multi_latent_attention": (
             "deferrable_linear",
         ),
-        "paddlefleet.transformer.dsv4_hybrid_attention": (
-            "deferrable_linear",
-        ),
+        "paddlefleet.transformer.dsv4_hybrid_attention": ("deferrable_linear",),
         # The two sparse-attention indexers; both feed attn_indexer_* points.
         "paddlefleet.transformer.dsa_attention": ("deferrable_linear",),
         "paddlefleet.transformer.csa_attention": ("deferrable_linear",),
@@ -1659,7 +1661,9 @@ class TestDeferralHelpersAreImported(unittest.TestCase):
             missing = (loaded & watched) - bound
             if missing:
                 offenders.append(f"{path.relative_to(root)}: {sorted(missing)}")
-        self.assertEqual(offenders, [], "used without import: " + str(offenders))
+        self.assertEqual(
+            offenders, [], "used without import: " + str(offenders)
+        )
         print("[imports] static sweep clean")
 
 

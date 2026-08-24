@@ -137,7 +137,6 @@ def dw_overlap_enabled(config, point: str) -> bool:
     return bool(selected) and point in selected
 
 
-
 @dataclass
 class TransformerConfig(ModelParallelConfig):
     """Configuration object for transformers."""

@@ -2733,9 +2733,7 @@ class ExpertsGroupGemmContiguousNode:
         self.o1 = None
         # dw2 deferral additionally needs the bf16 weight-grad GEMM; the
         # bwd_down_weight fallback has no WeightGradStore path.
-        defer_dw2 = (
-            self.defer_expert_down_dw and self.use_bf16_gemm_weight_grad
-        )
+        defer_dw2 = self.defer_expert_down_dw and self.use_bf16_gemm_weight_grad
         if a2a_async_fn is None:
             # dw1
             if self.use_bf16_gemm_weight_grad:

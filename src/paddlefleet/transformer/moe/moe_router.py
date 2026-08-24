@@ -37,7 +37,6 @@ from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddle._C_ops import matmul_grad
 from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
@@ -55,6 +54,7 @@ from paddlefleet.parallel_state import (
     get_tensor_model_parallel_group,
 )
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
+from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 
 # MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"

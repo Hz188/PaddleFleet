@@ -36,11 +36,11 @@ import paddle.nn.functional as F
 from paddle import Tensor, framework, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
-from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
 from paddlefleet.transformer import FleetLayer
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 
 _ACCURACY_COMPATIBLE_KERNEL: bool = (
     os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"

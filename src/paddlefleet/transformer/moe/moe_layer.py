@@ -965,9 +965,13 @@ class MoELayer(nn.Layer):
             return
         if self.use_latent_moe:
             self._latent_hidden = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc1_latent_proj, hidden_states
+                self.config,
+                "moe_latent_proj",
+                self.fc1_latent_proj,
+                hidden_states,
             )
             self.token_dispatcher.pre_allgather(self._latent_hidden)
+
         else:
             self._latent_hidden = None
             self.token_dispatcher.pre_allgather(hidden_states)
@@ -1103,7 +1107,10 @@ class MoELayer(nn.Layer):
             self._latent_hidden = None
         else:
             hidden_states = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc1_latent_proj, hidden_states
+                self.config,
+                "moe_latent_proj",
+                self.fc1_latent_proj,
+                hidden_states,
             )
         return hidden_states
 
@@ -1119,7 +1126,10 @@ class MoELayer(nn.Layer):
         # Latent MoE: project hidden_states to latent space before dispatch
         if self.use_latent_moe:
             hidden_states = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc1_latent_proj, hidden_states
+                self.config,
+                "moe_latent_proj",
+                self.fc1_latent_proj,
+                hidden_states,
             )
 
         should_log_balance = (
@@ -1148,7 +1158,10 @@ class MoELayer(nn.Layer):
             if self.latent_norm is not None:
                 hidden_states = self.latent_norm(hidden_states)
             hidden_states = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc2_latent_proj, hidden_states
+                self.config,
+                "moe_latent_proj",
+                self.fc2_latent_proj,
+                hidden_states,
             )
 
 
@@ -1249,7 +1262,10 @@ class MoELayer(nn.Layer):
             if self.latent_norm is not None:
                 hidden_states = self.latent_norm(hidden_states)
             hidden_states = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc2_latent_proj, hidden_states
+                self.config,
+                "moe_latent_proj",
+                self.fc2_latent_proj,
+                hidden_states,
             )
 
 
@@ -1364,7 +1380,10 @@ class MoELayer(nn.Layer):
         hidden_states, token_probs, token_indices = args
         if self.use_latent_moe:
             hidden_states = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc1_latent_proj, hidden_states
+                self.config,
+                "moe_latent_proj",
+                self.fc1_latent_proj,
+                hidden_states,
             )
         assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
         hidden_states = self.token_dispatcher.dispatch_preprocess_overlap(
@@ -1495,7 +1514,10 @@ class MoELayer(nn.Layer):
             if self.latent_norm is not None:
                 hidden_states = self.latent_norm(hidden_states)
             hidden_states = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc2_latent_proj, hidden_states
+                self.config,
+                "moe_latent_proj",
+                self.fc2_latent_proj,
+                hidden_states,
             )
 
         if self.training and self.router_aux_loss_coef and aux_loss is not None:
@@ -1672,8 +1694,11 @@ class MoELayer(nn.Layer):
             # Latent MoE: project to latent space before single-card MoE
             if self.use_latent_moe:
                 reshaped_input = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc1_latent_proj, reshaped_input
-            )
+                    self.config,
+                    "moe_latent_proj",
+                    self.fc1_latent_proj,
+                    reshaped_input,
+                )
             if self.moe_expert_fusion:
                 output = self._forward_single_card_grouped_gemm_moe(
                     reshaped_input, mask, probs, topk_indices, topk_weights
@@ -1687,8 +1712,8 @@ class MoELayer(nn.Layer):
                 if self.latent_norm is not None:
                     output = self.latent_norm(output)
                 output = deferrable_linear_bare(
-                self.config, "moe_latent_proj", self.fc2_latent_proj, output
-            )
+                    self.config, "moe_latent_proj", self.fc2_latent_proj, output
+                )
 
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
