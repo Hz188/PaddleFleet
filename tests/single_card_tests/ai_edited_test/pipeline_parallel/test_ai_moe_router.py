@@ -1511,6 +1511,9 @@ class TestDeferrableLinearRouting(unittest.TestCase):
         "attn_kv_proj",
         "attn_out_proj",
         "attn_gate_proj",
+        "attn_indexer_q_proj",
+        "attn_indexer_k_proj",
+        "attn_indexer_weights_proj",
     )
 
     def setUp(self):
@@ -1590,6 +1593,9 @@ class TestDeferralHelpersAreImported(unittest.TestCase):
         "paddlefleet.transformer.dsv4_hybrid_attention": (
             "deferrable_linear",
         ),
+        # The two sparse-attention indexers; both feed attn_indexer_* points.
+        "paddlefleet.transformer.dsa_attention": ("deferrable_linear",),
+        "paddlefleet.transformer.csa_attention": ("deferrable_linear",),
     }
 
     def test_helpers_resolvable_in_each_module(self):

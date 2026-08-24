@@ -58,6 +58,28 @@ logger = logging.getLogger(__name__)
 #                              layer per in-flight microbatch
 #   attn_gate_proj          -> gated-attention gate projection
 #   attn_compressor_proj    -> CSA/HCA compressor's linear_wkv + linear_wgate
+#   attn_indexer_q_proj     -> sparse-attention indexer q projection. Covers
+#                              both indexers: DSAIndexer.wq_b (latent-MQA
+#                              layers) and CSAIndexer.linear_wq_b (CSA
+#                              layers), same q_lora -> n_heads*head_dim shape
+#   attn_indexer_k_proj     -> DSAIndexer.wk. Tiny (hidden -> head_dim); the
+#                              CSA indexer has no counterpart, it builds K with
+#                              its own compressor instead
+#   attn_indexer_weights_proj
+#                           -> indexer per-head weight projection, both
+#                              DSAIndexer.weights_proj and
+#                              CSAIndexer.linear_weights_proj. Tiny
+#                              (hidden -> n_heads)
+#                              All three only produce a dW while the indexer
+#                              loss is on (dsa_indexer_loss_coeff > 0); the
+#                              indexer's inputs are detached from the backbone,
+#                              so they never affect the trunk gradient.
+#                              How many layers each covers depends on which
+#                              indexers the model builds: a CSAIndexer exists
+#                              only where 1 < compress_ratio < 128 and
+#                              csa_dense_mode is False, so an HCA-only model
+#                              (ratio 128, attend-to-all) has none and these
+#                              points reach the latent-MQA layers alone
 #   moe_router_gate         -> MoE router gate matmul
 #   moe_latent_proj         -> latent-MoE fc1_latent_proj + fc2_latent_proj
 #   moe_expert_up_gate_proj -> MoE routed expert up_gate_proj (a.k.a. w1)
@@ -88,6 +110,9 @@ P2P_OVERLAP_DW_CALC_CHOICES = (
     "attn_o_group_proj",
     "attn_gate_proj",
     "attn_compressor_proj",
+    "attn_indexer_q_proj",
+    "attn_indexer_k_proj",
+    "attn_indexer_weights_proj",
     "moe_router_gate",
     "moe_latent_proj",
     "moe_expert_up_gate_proj",
@@ -231,6 +256,30 @@ class TransformerConfig(ModelParallelConfig):
         vpp rank 0 pp rank 3 holds: decoder
         vpp rank 1 pp rank 0~2 holds: decoder
         vpp rank 1 pp rank 3 holds: mtp, loss"""
+
+    pp_vpp_layer_split: list = None
+    """Non-uniform pipeline split: how many segmentable layers each
+    (vpp chunk, pp rank) gets. None keeps the equal split.
+
+    Needs pipeline_model_parallel_size * virtual_pipeline_model_parallel_size
+    entries, in the order Paddle segments them -- vpp0pp0, vpp0pp1, ...,
+    vpp1pp0, ... -- i.e. entry i belongs to pp rank (i % pp_size).
+
+    "Segmentable" means matched by the seg_method regex, which is
+    TransformerLayer|EmptyLayer (plus MultiTokenPredictionLayer when
+    separate_mtp_headloss is set). So the entries count decoder layers and the
+    EmptyLayer padding from num_empty_layers_add_in_head/tail, and must sum to
+    that total. The embedding, the HC contract / final norm, the MTP layer and
+    lm_head + loss are not matched: they keep riding with a neighbouring chunk
+    exactly as they do under the equal split.
+
+    Entries must be positive. A zero-size chunk has nothing to run, which
+    degrades the schedule to blocking p2p, and Paddle names chunk sublayers by
+    their start index so two chunks starting at the same layer would collide.
+
+    Setting this frees num_empty_layers_add_in_head/tail from having to make
+    the layer count divisible; they then only shift boundaries relative to the
+    unmatched layers above."""
 
     account_for_embedding_in_pipeline_split: bool = False
     """If set, the embedding layer will be treated as a standard transformer
