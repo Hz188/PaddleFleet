@@ -241,30 +241,6 @@ class TransformerConfig(ModelParallelConfig):
         vpp rank 1 pp rank 0~2 holds: decoder
         vpp rank 1 pp rank 3 holds: mtp, loss"""
 
-    pp_vpp_layer_split: list = None
-    """Non-uniform pipeline split: how many segmentable layers each
-    (vpp chunk, pp rank) gets. None keeps the equal split.
-
-    Needs pipeline_model_parallel_size * virtual_pipeline_model_parallel_size
-    entries, in the order Paddle segments them -- vpp0pp0, vpp0pp1, ...,
-    vpp1pp0, ... -- i.e. entry i belongs to pp rank (i % pp_size).
-
-    "Segmentable" means matched by the seg_method regex, which is
-    TransformerLayer|EmptyLayer (plus MultiTokenPredictionLayer when
-    separate_mtp_headloss is set). So the entries count decoder layers and the
-    EmptyLayer padding from num_empty_layers_add_in_head/tail, and must sum to
-    that total. The embedding, the HC contract / final norm, the MTP layer and
-    lm_head + loss are not matched: they keep riding with a neighbouring chunk
-    exactly as they do under the equal split.
-
-    Entries must be positive. A zero-size chunk has nothing to run, which
-    degrades the schedule to blocking p2p, and Paddle names chunk sublayers by
-    their start index so two chunks starting at the same layer would collide.
-
-    Setting this frees num_empty_layers_add_in_head/tail from having to make
-    the layer count divisible; they then only shift boundaries relative to the
-    unmatched layers above."""
-
     account_for_embedding_in_pipeline_split: bool = False
     """If set, the embedding layer will be treated as a standard transformer
     layer in the context of partition and placement for pipeline parallelism."""
