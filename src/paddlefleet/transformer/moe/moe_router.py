@@ -173,7 +173,6 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         ctx.defer_dw = defer_dw
         ctx.use_accuracy_compatible = use_accuracy_compatible
 
-
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
@@ -1659,7 +1658,6 @@ class TopKRouter(StandardMoERouter):
                     self.config.moe_router_force_load_balancing,
                     dw_overlap_enabled(self.config, "moe_router_gate"),
                     self.use_accuracy_compatible,
-
                 )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)

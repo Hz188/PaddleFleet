@@ -45,11 +45,11 @@ from paddlefleet.recompute_utils import (
     module_needs_refined_recompute,
 )
 from paddlefleet.transformer.activations import situ
-from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.dw_overlap import (
     deferrable_linear_bare,
     install_sonic_moe_dw_deferral,
 )
+from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddlefleet.transformer.utils import profile
 
@@ -1164,7 +1164,6 @@ class MoELayer(nn.Layer):
                 hidden_states,
             )
 
-
         return hidden_states
 
     def fusion_moe_forward(
@@ -1267,7 +1266,6 @@ class MoELayer(nn.Layer):
                 self.fc2_latent_proj,
                 hidden_states,
             )
-
 
         return hidden_states
 
@@ -1714,7 +1712,6 @@ class MoELayer(nn.Layer):
                 output = deferrable_linear_bare(
                     self.config, "moe_latent_proj", self.fc2_latent_proj, output
                 )
-
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
 
