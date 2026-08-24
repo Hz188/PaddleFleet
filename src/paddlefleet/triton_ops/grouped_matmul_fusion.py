@@ -24,6 +24,7 @@ Backward: dx[g, m, :] = dy[g, m, :] @ w[g, :, :]      for each group g
 """
 
 from functools import partial
+
 import paddle
 
 from .utils import enable_compat_on_triton_kernel, is_torch_compat_available
@@ -324,7 +325,7 @@ def _launch_grouped_dw(
     run inline or be handed to a caller as a thunk to run later.
     """
     dw = paddle.empty([G, R, D], dtype=dy_3d.dtype)
-    grid_dw = lambda META: (  # noqa: E731
+    grid_dw = lambda META: (
         G,
         triton.cdiv(R, META["BLOCK_M"]) * triton.cdiv(D, META["BLOCK_N"]),
     )
@@ -549,7 +550,9 @@ def fused_grouped_matmul(x, w, dw_accumulator=None, group_shape=None):
         # deferred-dW path: w is the 2-D leaf parameter, viewed as [G, R, D]
         # inside the PyLayer. Validate against the view, not the parameter.
         if len(group_shape) != 3:
-            raise ValueError(f"group_shape must be [G, R, D], got {group_shape}")
+            raise ValueError(
+                f"group_shape must be [G, R, D], got {group_shape}"
+            )
         w_view_shape = list(group_shape)
     elif w.ndim != 3:
         raise ValueError(f"w must be 3-D [G, R, D], got shape {w.shape}")

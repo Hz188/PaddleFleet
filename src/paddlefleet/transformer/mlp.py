@@ -203,7 +203,10 @@ class MLP(FleetLayer):
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
         intermediate_parallel, bias_parallel = deferrable_linear(
-            self.config, self._dw_up_gate_point, self.up_gate_proj, hidden_states
+            self.config,
+            self._dw_up_gate_point,
+            self.up_gate_proj,
+            hidden_states,
         )
         nvtx_range_pop(suffix="up_gate_proj")
 

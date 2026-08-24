@@ -34,7 +34,6 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 )
 
 from paddlefleet import tensor_parallel
-from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
@@ -45,6 +44,7 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 

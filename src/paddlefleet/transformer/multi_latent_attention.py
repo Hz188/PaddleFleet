@@ -55,8 +55,8 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.transformer.attention import Attention
-from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.dw_overlap import deferrable_linear
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
