@@ -929,10 +929,10 @@ class TransformerConfig(ModelParallelConfig):
     gradient, so running it early is pure relocation.
 
     No knob beyond on/off on purpose: only the chunk whose backward comes next is
-    ever hoisted, so at most one chunk's discarded activations are resident early
-    and the very next backward consumes them. If that chunk has no spans (an
-    EmptyLayer chunk) nothing runs -- those bubbles are a partitioning problem,
-    not something filler can reach.
+    ever run early, so at most one chunk's discarded activations are resident
+    early and the very next backward consumes them. If that chunk has no spans
+    (an EmptyLayer chunk) nothing runs -- those bubbles are a partitioning
+    problem, not something filler can reach.
 
     Requires recompute_granularity == "selective" and
     pipeline_model_parallel_size > 1.

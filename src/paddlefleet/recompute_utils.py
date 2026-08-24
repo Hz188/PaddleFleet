@@ -41,7 +41,7 @@ def install_recompute_p2p_overlap(config):
         raise ValueError(
             "p2p_overlap_recompute needs recompute_granularity='selective', "
             f"got {config.recompute_granularity!r}: there are no recompute "
-            "spans to hoist otherwise"
+            "spans to run early otherwise"
         )
     if enabled and getattr(config, "pipeline_model_parallel_size", 1) <= 1:
         raise ValueError(
