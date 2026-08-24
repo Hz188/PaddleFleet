@@ -1976,7 +1976,9 @@ class CSAIndexer(nn.Layer):
         b, sq, _ = x.shape
         doc_lens = docmask_meta.doc_lens if docmask_meta is not None else None
         # Q path
-        q, _ = self.linear_wq_b(qr)  # [b, sq, n_heads * head_dim]
+        q, _ = deferrable_linear(
+            self.config, "attn_indexer_q_proj", self.linear_wq_b, qr
+        )  # [b, sq, n_heads * head_dim]
         q = q.reshape([b, sq, self.index_n_heads, self.index_head_dim])
         if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
             q = _apply_rope(
@@ -2004,7 +2006,12 @@ class CSAIndexer(nn.Layer):
         )  # [b, n_compressed, index_head_dim]
 
         # Weights
-        weights, _ = self.linear_weights_proj(x)  # [b, sq, n_heads]
+        weights, _ = deferrable_linear(
+            self.config,
+            "attn_indexer_weights_proj",
+            self.linear_weights_proj,
+            x,
+        )  # [b, sq, n_heads]
         weights = weights * (self.index_n_heads**-0.5)
 
         return q, k, weights
