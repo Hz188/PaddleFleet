@@ -35,6 +35,8 @@ Run with:
 """
 
 import os
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1439,12 +1441,27 @@ class TestExpertDwDeferralGuard(unittest.TestCase):
     hide a real misconfiguration, so these are hard errors now.
     """
 
-    def _check(self, up_gate, down, deep_gemm, subbatch):
+    def _check(
+        self,
+        up_gate,
+        down,
+        deep_gemm,
+        subbatch,
+        use_fp8_mlp=False,
+        use_bf16_gemm_weight_grad=True,
+    ):
         from paddlefleet.transformer.moe.fp8_utils import (
             _check_expert_dw_deferral_supported,
         )
 
-        _check_expert_dw_deferral_supported(up_gate, down, deep_gemm, subbatch)
+        _check_expert_dw_deferral_supported(
+            up_gate,
+            down,
+            deep_gemm,
+            subbatch,
+            use_fp8_mlp,
+            use_bf16_gemm_weight_grad,
+        )
 
     def test_nothing_requested_is_always_fine(self):
         """No point selected -> unsupported settings must not raise."""
@@ -1456,21 +1473,72 @@ class TestExpertDwDeferralGuard(unittest.TestCase):
         print("[dw guard] deep_gemm + no subbatch accepts both points OK")
 
     def test_up_gate_needs_deep_gemm(self):
-        with self.assertRaisesRegex(AssertionError, "moe_deep_gemm=False"):
+        with self.assertRaisesRegex(ValueError, "moe_deep_gemm=False"):
             self._check(True, False, deep_gemm=False, subbatch=None)
         print("[dw guard] up_gate without deep_gemm raises OK")
 
     def test_down_needs_deep_gemm(self):
-        with self.assertRaisesRegex(AssertionError, "moe_deep_gemm=False"):
+        with self.assertRaisesRegex(ValueError, "moe_deep_gemm=False"):
             self._check(False, True, deep_gemm=False, subbatch=None)
         print("[dw guard] down without deep_gemm raises OK")
 
     def test_down_rejects_subbatch(self):
         with self.assertRaisesRegex(
-            AssertionError, "moe_subbatch_token_num_after_dispatch=512"
+            ValueError, "moe_subbatch_token_num_after_dispatch=512"
         ):
             self._check(False, True, deep_gemm=True, subbatch=512)
         print("[dw guard] down with subbatch raises OK")
+
+    def test_default_fp8_wgrad_rejects_expert_deferral(self):
+        from paddlefleet.transformer.moe.fp8_utils import (
+            ExpertsGroupGemmContiguousNode,
+        )
+
+        with self.assertRaisesRegex(ValueError, "fp8_wgrad=True"):
+            ExpertsGroupGemmContiguousNode(
+                SimpleNamespace(experts=[]),
+                use_fp8_mlp=True,
+                moe_deep_gemm=True,
+                defer_expert_up_gate_dw=True,
+            )
+        print("[dw guard] default native FP8 wgrad rejects deferral OK")
+
+    def test_fp8_mlp_with_bf16_wgrad_allows_expert_deferral(self):
+        self._check(
+            True,
+            True,
+            deep_gemm=True,
+            subbatch=None,
+            use_fp8_mlp=True,
+            use_bf16_gemm_weight_grad=True,
+        )
+        print("[dw guard] FP8 MLP with BF16 wgrad accepts deferral OK")
+
+    def test_down_rejects_subbatch_under_python_optimize(self):
+        code = """
+from paddlefleet.transformer.moe.fp8_utils import (
+    _check_expert_dw_deferral_supported,
+)
+
+try:
+    _check_expert_dw_deferral_supported(False, True, True, 512, True, True)
+except ValueError:
+    pass
+else:
+    raise RuntimeError("unsupported down_proj deferral was accepted")
+"""
+        result = subprocess.run(
+            [sys.executable, "-O", "-c", code],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        print("[dw guard] down with subbatch raises under python -O OK")
 
     def test_up_gate_allows_subbatch(self):
         """dw1 reads do1, not out_grad: the subbatch alias does not apply."""
@@ -1495,6 +1563,8 @@ class _PlainLinear(paddle.nn.Layer):
 
 class _SelectorConfig:
     tensor_model_parallel_size = 1
+    pipeline_model_parallel_size = 2
+    virtual_pipeline_model_parallel_size = 2
     use_bias = False
 
     def __init__(self, selected):
@@ -1564,7 +1634,42 @@ class TestDeferrableLinearRouting(unittest.TestCase):
             0,
             "the stand-in has no collective, so tp>1 must fall back",
         )
+        for pp, vpp in ((1, None), (2, None)):
+            with self.subTest(pp=pp, vpp=vpp):
+                WeightGradStore.clear()
+                config = _SelectorConfig(["attn_q_proj"])
+                config.pipeline_model_parallel_size = pp
+                config.virtual_pipeline_model_parallel_size = vpp
+                self.assertEqual(
+                    self._run(config, "attn_q_proj"),
+                    0,
+                    f"PP={pp}, VPP={vpp} must use inline dW",
+                )
         print("[deferrable_linear] disabled / tp>1 fallback OK")
+
+    def test_ordinary_pp_and_pp1_preserve_inline_weight_grad(self):
+        expected = np.matmul(
+            np.ones([6, 32], dtype="float32").T,
+            np.ones([6, 16], dtype="float32"),
+        )
+        for pp, vpp in ((1, None), (2, None)):
+            with self.subTest(pp=pp, vpp=vpp):
+                WeightGradStore.clear()
+                config = _SelectorConfig(["attn_q_proj"])
+                config.pipeline_model_parallel_size = pp
+                config.virtual_pipeline_model_parallel_size = vpp
+                layer = _PlainLinear(32, 16)
+                x = paddle.ones([2, 3, 32], dtype="float32")
+                x.stop_gradient = False
+                out, _ = deferrable_linear(config, "attn_q_proj", layer, x)
+                out.backward(paddle.ones_like(out))
+                self.assertEqual(len(WeightGradStore.cache), 0)
+                np.testing.assert_allclose(
+                    layer.weight.main_grad.numpy(),
+                    expected,
+                    rtol=1e-6,
+                    atol=1e-6,
+                )
 
 
 # ============================================================

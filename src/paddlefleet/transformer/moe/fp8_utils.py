@@ -481,7 +481,12 @@ class _PerExpertWeightProxy:
 
 
 def _check_expert_dw_deferral_supported(
-    defer_up_gate, defer_down, moe_deep_gemm, subbatch_token_num
+    defer_up_gate,
+    defer_down,
+    moe_deep_gemm,
+    subbatch_token_num,
+    use_fp8_mlp,
+    use_bf16_gemm_weight_grad,
 ):
     """Fail fast when a requested expert dW deferral cannot be honoured.
 
@@ -489,6 +494,10 @@ def _check_expert_dw_deferral_supported(
     branch of ``bf16_weight_grad`` with a ``WeightGradStore`` call; the
     ``batched_gemm`` fallback would ignore the request and compute inline, so
     the feature would be a silent no-op.
+
+    FP8 expert compute additionally needs its BF16 weight-gradient fallback.
+    Native FP8 weight-gradient kernels compute inline and do not enqueue work
+    on ``WeightGradStore``.
 
     down_proj additionally needs a non-subbatch backward: a deferred dw2 keeps
     reading ``out_grad``, so dx must not reuse that buffer. Outside the
@@ -498,22 +507,36 @@ def _check_expert_dw_deferral_supported(
     ``backward_impl_subbatch``), so there the alias cannot be broken.
     """
     if defer_up_gate or defer_down:
-        assert moe_deep_gemm, (
+        if not moe_deep_gemm:
+            raise ValueError(
+                "p2p_overlap_dw_calc requests an expert dW deferral "
+                "(moe_expert_up_gate_proj / moe_expert_down_proj), but "
+                "moe_deep_gemm=False. Only the deep_gemm weight-grad path can "
+                "queue dW on WeightGradStore, so the request would be a silent "
+                "no-op. Set moe_deep_gemm=True or drop the point."
+            )
+    if (
+        (defer_up_gate or defer_down)
+        and use_fp8_mlp
+        and not use_bf16_gemm_weight_grad
+    ):
+        raise ValueError(
             "p2p_overlap_dw_calc requests an expert dW deferral "
             "(moe_expert_up_gate_proj / moe_expert_down_proj), but "
-            "moe_deep_gemm=False. Only the deep_gemm weight-grad path can "
-            "queue dW on WeightGradStore, so the request would be a silent "
-            "no-op. Set moe_deep_gemm=True or drop the point."
+            "fp8_wgrad=True selects the native FP8 weight-gradient path. "
+            "That path computes dW inline and cannot queue work on "
+            "WeightGradStore. Set fp8_wgrad=False or drop the point."
         )
     if defer_down:
-        assert subbatch_token_num is None, (
-            "p2p_overlap_dw_calc requests moe_expert_down_proj, but "
-            f"moe_subbatch_token_num_after_dispatch={subbatch_token_num}. "
-            "The subbatch backward returns out_grad itself as dx, so a "
-            "deferred dw2 would read the overwritten buffer and produce a "
-            "wrong gradient. Unset moe_subbatch_token_num_after_dispatch or "
-            "drop the point."
-        )
+        if subbatch_token_num is not None:
+            raise ValueError(
+                "p2p_overlap_dw_calc requests moe_expert_down_proj, but "
+                f"moe_subbatch_token_num_after_dispatch={subbatch_token_num}. "
+                "The subbatch backward returns out_grad itself as dx, so a "
+                "deferred dw2 would read the overwritten buffer and produce a "
+                "wrong gradient. Unset moe_subbatch_token_num_after_dispatch "
+                "or drop the point."
+            )
 
 
 class ExpertsGroupGemmContiguousNode:
@@ -603,12 +626,6 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_deep_gemm = moe_deep_gemm
         self.use_ue8m0 = use_ue8m0
         self.is_split_group_gemm = not moe_expert_fusion
-        _check_expert_dw_deferral_supported(
-            defer_expert_up_gate_dw,
-            defer_expert_down_dw,
-            moe_deep_gemm,
-            self.moe_subbatch_token_num_after_dispatch,
-        )
         self.defer_expert_up_gate_dw = defer_expert_up_gate_dw
         self.defer_expert_down_dw = defer_expert_down_dw
         self.moe_expert_fusion = moe_expert_fusion
@@ -621,6 +638,14 @@ class ExpertsGroupGemmContiguousNode:
         )
         self.situ_glu_fusion = getattr(config, "situ_glu_fusion", False)
         self.use_accuracy_compatible = use_accuracy_compatible
+        _check_expert_dw_deferral_supported(
+            defer_expert_up_gate_dw,
+            defer_expert_down_dw,
+            moe_deep_gemm,
+            self.moe_subbatch_token_num_after_dispatch,
+            use_fp8_mlp,
+            self.use_bf16_gemm_weight_grad,
+        )
 
     def cached_tensors(self):
         """
