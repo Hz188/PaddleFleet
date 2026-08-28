@@ -159,6 +159,8 @@ def _make_mla_config(**overrides):
         "rms_norm_eps": 1e-5,
         "context_parallel_size": 1,
         "sequence_parallel": False,
+        "pipeline_model_parallel_size": 2,
+        "virtual_pipeline_model_parallel_size": 2,
         "apply_query_key_layer_scaling": False,
         "sliding_window": None,
         "window_attn_skip_freq": None,
@@ -465,6 +467,8 @@ class TestTopKRouterDwP2POverlap(unittest.TestCase):
             router_aux_loss_coef=0.01,
             context_parallel_size=1,
             sequence_parallel=False,
+            pipeline_model_parallel_size=2,
+            virtual_pipeline_model_parallel_size=2,
         )
         config.p2p_overlap_dw_calc = (
             ["moe_router_gate"] if overlap_gate else None
@@ -777,7 +781,11 @@ class TestMoELayerP2POverlapInit(unittest.TestCase):
     @staticmethod
     def _config():
         return TransformerConfig(
-            hidden_size=64, num_hidden_layers=1, num_attention_heads=2
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            pipeline_model_parallel_size=2,
+            virtual_pipeline_model_parallel_size=2,
         )
 
     def test_disabled_by_default(self):
@@ -967,7 +975,7 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
         builds the node with moe_deep_gemm=True.
         """
         print("\n[FusionMoePyLayer] deferral without deep_gemm must raise")
-        with self.assertRaisesRegex(AssertionError, "moe_deep_gemm=False"):
+        with self.assertRaisesRegex(ValueError, "moe_deep_gemm=False"):
             self._run_fusion_layer(defer_dw=True)
         print("[FusionMoePyLayer] rejected as expected OK")
 
@@ -1665,7 +1673,11 @@ class TestDeferrableLinearRouting(unittest.TestCase):
                 out.backward(paddle.ones_like(out))
                 self.assertEqual(len(WeightGradStore.cache), 0)
                 np.testing.assert_allclose(
-                    layer.weight.main_grad.numpy(),
+                    (
+                        layer.weight.main_grad
+                        if layer.weight.main_grad is not None
+                        else layer.weight.grad
+                    ).numpy(),
                     expected,
                     rtol=1e-6,
                     atol=1e-6,
@@ -1886,6 +1898,25 @@ class _RecordingWeight:
         self.hook_calls += 1
 
 
+def _sonicmoe_supported():
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        major, _ = paddle.device.cuda.get_device_capability()
+        if major < 10:
+            return False
+    except (AttributeError, RuntimeError):
+        return False
+    try:
+        import paddlefleet_ops.sonicmoe.functional  # noqa: F401
+    except (ImportError, RuntimeError):
+        return False
+    return True
+
+
+@unittest.skipUnless(
+    _sonicmoe_supported(), "SonicMoE is unavailable for this GPU"
+)
 class TestSonicMoeWgradDeferral(unittest.TestCase):
     """The hook must queue the selected point's wgrad and nothing else.
 
