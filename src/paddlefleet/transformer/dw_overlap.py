@@ -121,7 +121,7 @@ def install_sonic_moe_dw_deferral(config):
     points = frozenset(
         p for p in SONIC_MOE_DW_POINTS if dw_overlap_enabled(config, p)
     )
-    if not points:
+    if not points or not _supports_deferred_scheduler(config):
         return
 
     try:
@@ -136,6 +136,16 @@ def install_sonic_moe_dw_deferral(config):
         ) from exc
 
     set_wgrad_deferral_hook(partial(_defer_sonic_moe_wgrad, points))
+
+
+def _supports_deferred_scheduler(config):
+    """Whether the live scheduler consumes WeightGradStore work."""
+    vpp_size = getattr(config, "virtual_pipeline_model_parallel_size", None)
+    return (
+        getattr(config, "pipeline_model_parallel_size", 1) > 1
+        and vpp_size is not None
+        and vpp_size > 1
+    )
 
 
 class DeferredWeightGradLinear(paddle.autograd.PyLayer):
@@ -209,10 +219,7 @@ def _can_defer(config, point, layer):
         point is not None
         and dw_overlap_enabled(config, point)
         and getattr(config, "tensor_model_parallel_size", 1) == 1
-        and getattr(config, "pipeline_model_parallel_size", 1) > 1
-        and getattr(config, "virtual_pipeline_model_parallel_size", None)
-        is not None
-        and getattr(config, "virtual_pipeline_model_parallel_size", 0) > 1
+        and _supports_deferred_scheduler(config)
         and not getattr(config, "use_bias", False)
         and getattr(layer, "bias", None) is None
     )

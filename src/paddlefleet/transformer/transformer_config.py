@@ -910,8 +910,9 @@ class TransformerConfig(ModelParallelConfig):
     (an EmptyLayer chunk) nothing runs -- those bubbles are a partitioning
     problem, not something filler can reach.
 
-    Requires recompute_granularity == "selective" and
-    pipeline_model_parallel_size > 1.
+    Requires recompute_granularity == "selective",
+    pipeline_model_parallel_size > 1, and
+    virtual_pipeline_model_parallel_size > 1 (the interleaved/VPP scheduler).
     """
 
     use_ue8m0: bool = False
@@ -1771,10 +1772,11 @@ class TransformerConfig(ModelParallelConfig):
                 for p in self.p2p_overlap_dw_calc
                 if p not in P2P_OVERLAP_DW_CALC_CHOICES
             ]
-            assert not unknown, (
-                f"unknown p2p_overlap_dw_calc entries {unknown}, "
-                f"expected a subset of {list(P2P_OVERLAP_DW_CALC_CHOICES)}"
-            )
+            if unknown:
+                raise ValueError(
+                    f"unknown p2p_overlap_dw_calc entries {unknown}, "
+                    f"expected a subset of {list(P2P_OVERLAP_DW_CALC_CHOICES)}"
+                )
 
         if self.mtp_shared_last_layer:
             # When MTP reuses the last backbone TransformerLayer's parameters,
