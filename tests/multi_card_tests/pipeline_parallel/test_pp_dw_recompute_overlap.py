@@ -49,7 +49,7 @@ Layout: ``pp=4``, ``vpp=2`` -> 8 virtual chunks, one segmentable layer each.
     chunk (vpp, pp) | layer          | queues dW | registers recompute
     ----------------|----------------|-----------|--------------------
     (0, 0)          | LinearPipe     | yes       | no
-    (0, 1)          | LinearPipe     | yes       | no
+    (0, 1)          | DeferredLinear | yes       | no
     (0, 2)          | NoParamPipe    | **no**    | **no**
     (0, 3)          | LinearPipe     | yes       | no
     (1, 0)          | RecomputePipe  | yes       | **yes**
@@ -95,6 +95,7 @@ from paddle.nn import Layer, Linear
 
 from paddlefleet.recompute_utils import install_recompute_p2p_overlap
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
+from paddlefleet.transformer.dw_overlap import DeferredWeightGradLinear
 
 HIDDEN = 8
 MICRO_BATCH_SIZE = 2
@@ -147,6 +148,28 @@ class LinearPipe(SplitBWLinear):
     window, so it is what the deferral path has to be tested against. Subclassed
     only to give ``seg_method`` a name to match on.
     """
+
+
+class DeferredLinearPipe(Layer):
+    """A real ``DeferredWeightGradLinear`` layer for the scheduler regression.
+
+    The class switch makes the same model serve as the inline baseline and the
+    deferred run. Unlike ``SplitBWLinear``, its backward is the implementation
+    provided by this change, so the VPP scheduler must actually consume its
+    queued dW for the run to match the baseline.
+    """
+
+    use_deferred = False
+
+    def __init__(self, hidden):
+        super().__init__()
+        self.weight = self.create_parameter([hidden, hidden])
+        self.weight.main_grad = None
+
+    def forward(self, input):
+        if self.use_deferred:
+            return DeferredWeightGradLinear.apply(input, self.weight)
+        return paddle.nn.functional.linear(input, self.weight)
 
 
 class NoParamPipe(Layer):
@@ -202,7 +225,7 @@ class ModelPipe(PipelineLayer):
     def __init__(self, **kwargs):
         decs = [
             LayerDesc(LinearPipe, HIDDEN, HIDDEN, bias_attr=False),  # (0, 0)
-            LayerDesc(LinearPipe, HIDDEN, HIDDEN, bias_attr=False),  # (0, 1)
+            LayerDesc(DeferredLinearPipe, HIDDEN),  # (0, 1), PR path
             LayerDesc(NoParamPipe),  # (0, 2)  no dW, no recompute
             LayerDesc(LinearPipe, HIDDEN, HIDDEN, bias_attr=False),  # (0, 3)
             LayerDesc(RecomputePipe, HIDDEN),  # (1, 0)  registers a span
@@ -213,7 +236,9 @@ class ModelPipe(PipelineLayer):
         super().__init__(
             layers=decs,
             loss_fn=CriterionPipe(),
-            seg_method="layer:LinearPipe|NoParamPipe|RecomputePipe",
+            seg_method=(
+                "layer:LinearPipe|DeferredLinearPipe|NoParamPipe|RecomputePipe"
+            ),
             **kwargs,
         )
 
@@ -299,6 +324,7 @@ class TestPpDwRecomputeOverlap(unittest.TestCase):
         -- a wrong virtual-chunk key -- shows up as.
         """
         self._reset_stores()
+        DeferredLinearPipe.use_deferred = defer_dw
         model, optimizer = self._build()
 
         WeightGradStore.enabled = defer_dw
@@ -319,11 +345,19 @@ class TestPpDwRecomputeOverlap(unittest.TestCase):
                     [
                         (
                             name,
-                            None if p.grad is None else p.grad.numpy().copy(),
+                            (
+                                p.main_grad
+                                if getattr(p, "main_grad", None) is not None
+                                else p.grad
+                            ),
                         )
                         for name, p in model.named_parameters()
                     ]
                 )
+                grads[-1] = [
+                    (name, None if grad is None else grad.numpy().copy())
+                    for name, grad in grads[-1]
+                ]
                 model._optimizer_step()
         finally:
             self._reset_stores()
