@@ -538,6 +538,10 @@ class TestMoELayerRingBranches(unittest.TestCase):
             "use_ring_moe": True,
             "use_latent_moe": False,
             "_latent_hidden": None,
+            # Real MoELayer always carries its config; the latent projection
+            # path passes it to deferrable_linear_bare even when no dW point is
+            # selected.
+            "config": SimpleNamespace(p2p_overlap_dw_calc=None),
             "token_dispatcher": mock.MagicMock(),
             "_supports_three_path_clone": lambda: True,
         }
