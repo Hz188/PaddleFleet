@@ -1931,6 +1931,21 @@ class TestSonicMoeWgradDeferral(unittest.TestCase):
         )
         print("[sonic dW] unselected installs nothing OK")
 
+    def test_nothing_installed_for_ordinary_pp_or_pp1(self):
+        from paddlefleet_ops.sonicmoe import functional as sonic_functional
+
+        for pp, vpp in ((1, None), (2, None)):
+            with self.subTest(pp=pp, vpp=vpp):
+                config = _SelectorConfig(["moe_sonic_expert_up_gate_proj"])
+                config.pipeline_model_parallel_size = pp
+                config.virtual_pipeline_model_parallel_size = vpp
+                install_sonic_moe_dw_deferral(config)
+                self.assertIsNone(
+                    sonic_functional._WGRAD_DEFERRAL_HOOK,
+                    f"PP={pp}, VPP={vpp} must keep SonicMoE dW inline",
+                )
+        print("[sonic dW] ordinary PP and PP=1 stay inline OK")
+
     def test_selected_point_defers_until_pop(self):
         for point in self.POINTS:
             with self.subTest(point=point):
