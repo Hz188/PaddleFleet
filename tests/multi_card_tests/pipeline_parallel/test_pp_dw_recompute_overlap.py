@@ -132,6 +132,7 @@ class _RcConfig:
 
     recompute_granularity = "selective"
     pipeline_model_parallel_size = PP_DEGREE
+    virtual_pipeline_model_parallel_size = VPP
 
     def __init__(self, enabled):
         self.p2p_overlap_recompute = enabled
