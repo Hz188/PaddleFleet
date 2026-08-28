@@ -201,12 +201,18 @@ def _can_defer(config, point, layer):
     """Whether `layer`'s dW may be deferred for `point`.
 
     `point` may be None, which simply means "this call site has no deferral
-    point", so callers can pass a class attribute without branching.
+    point", so callers can pass a class attribute without branching. The
+    WeightGradStore consumer is only installed by the interleaved PP
+    scheduler, so ordinary PP (including PP=1) must stay inline.
     """
     return (
         point is not None
         and dw_overlap_enabled(config, point)
         and getattr(config, "tensor_model_parallel_size", 1) == 1
+        and getattr(config, "pipeline_model_parallel_size", 1) > 1
+        and getattr(config, "virtual_pipeline_model_parallel_size", None)
+        is not None
+        and getattr(config, "virtual_pipeline_model_parallel_size", 0) > 1
         and not getattr(config, "use_bias", False)
         and getattr(layer, "bias", None) is None
     )

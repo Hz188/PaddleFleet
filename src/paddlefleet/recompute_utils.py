@@ -48,6 +48,14 @@ def install_recompute_p2p_overlap(config):
             "p2p_overlap_recompute needs pipeline_model_parallel_size > 1: "
             "without pipeline parallel there is no p2p window to fill"
         )
+    vpp_size = getattr(config, "virtual_pipeline_model_parallel_size", None)
+    if enabled and (vpp_size is None or vpp_size <= 1):
+        raise ValueError(
+            "p2p_overlap_recompute needs "
+            "virtual_pipeline_model_parallel_size > 1: the recompute store "
+            "lifecycle is only established by the interleaved/VPP scheduler; "
+            "ordinary pipeline parallel has no named chunk to run"
+        )
     RecomputeStore.enabled = enabled
 
 

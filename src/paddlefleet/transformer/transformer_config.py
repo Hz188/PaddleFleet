@@ -933,7 +933,8 @@ class TransformerConfig(ModelParallelConfig):
     P2P_OVERLAP_DW_CALC_CHOICES. Selecting points individually lets a model that
     regresses on one of them keep the others. Requires a pp scheduler that
     flushes and pops WeightGradStore, tensor_model_parallel_size == 1 and
-    pipeline_model_parallel_size > 1.
+    pipeline_model_parallel_size > 1 and
+    virtual_pipeline_model_parallel_size > 1 (the interleaved/VPP scheduler).
     """
 
     p2p_overlap_recompute: bool = False
@@ -1806,6 +1807,7 @@ class TransformerConfig(ModelParallelConfig):
         ),
         "csa_train_indexer_only": "Use train_indexer_only instead.",
         "csa_indexer_init_from_scratch": "Use indexer_init_from_scratch instead.",
+        "dw_p2p_overlap": "Use p2p_overlap_dw_calc instead.",
     }
 
     # Same intent as ``renamed_config_keys``, but only rejected when the stale

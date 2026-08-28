@@ -42,6 +42,7 @@ from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 class _RcConfig:
     recompute_granularity = "selective"
     pipeline_model_parallel_size = 8
+    virtual_pipeline_model_parallel_size = 2
 
     def __init__(self, enabled):
         self.p2p_overlap_recompute = enabled
@@ -94,6 +95,14 @@ class TestRecomputeStore(unittest.TestCase):
         # no pipeline parallel means no p2p window to fill
         cfg = _RcConfig(True)
         cfg.pipeline_model_parallel_size = 1
+        with self.assertRaises(ValueError):
+            install_recompute_p2p_overlap(cfg)
+        cfg = _RcConfig(True)
+        cfg.virtual_pipeline_model_parallel_size = None
+        with self.assertRaises(ValueError):
+            install_recompute_p2p_overlap(cfg)
+        cfg = _RcConfig(True)
+        cfg.virtual_pipeline_model_parallel_size = 1
         with self.assertRaises(ValueError):
             install_recompute_p2p_overlap(cfg)
         print("[rc store] install validates granularity and pp OK")
