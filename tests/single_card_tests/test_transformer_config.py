@@ -64,6 +64,28 @@ else:
             msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
         )
 
+    def test_deferral_rejects_pp_without_interleaved_scheduler(self):
+        for pp, vpp in ((1, None), (2, None), (2, 1)):
+            with (
+                self.subTest(pp=pp, vpp=vpp),
+                self.assertRaisesRegex(ValueError, "virtual_pipeline"),
+            ):
+                TransformerConfig(
+                    p2p_overlap_dw_calc=["moe_expert_up_gate_proj"],
+                    pipeline_model_parallel_size=pp,
+                    virtual_pipeline_model_parallel_size=vpp,
+                )
+
+    def test_deferral_accepts_interleaved_scheduler(self):
+        config = TransformerConfig(
+            p2p_overlap_dw_calc=["moe_expert_up_gate_proj"],
+            pipeline_model_parallel_size=2,
+            virtual_pipeline_model_parallel_size=2,
+        )
+        self.assertEqual(
+            config.p2p_overlap_dw_calc, ["moe_expert_up_gate_proj"]
+        )
+
 
 class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
     """Tests for the moe_layer_freq / first_k_dense_replace logic in TransformerConfig.__post_init__."""

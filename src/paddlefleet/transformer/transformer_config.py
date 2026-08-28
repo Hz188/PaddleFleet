@@ -126,6 +126,16 @@ P2P_OVERLAP_DW_CALC_CHOICES = (
 )
 
 
+def dw_overlap_scheduler_supported(config) -> bool:
+    """Whether the live PP scheduler consumes deferred dW work."""
+    vpp_size = getattr(config, "virtual_pipeline_model_parallel_size", None)
+    return (
+        getattr(config, "pipeline_model_parallel_size", 1) > 1
+        and vpp_size is not None
+        and vpp_size > 1
+    )
+
+
 def dw_overlap_enabled(config, point: str) -> bool:
     """Whether `point`'s weight grad should be deferred to cover p2p comm.
 
@@ -134,7 +144,11 @@ def dw_overlap_enabled(config, point: str) -> bool:
     not carry the field.
     """
     selected = getattr(config, "p2p_overlap_dw_calc", None)
-    return bool(selected) and point in selected
+    return (
+        bool(selected)
+        and point in selected
+        and dw_overlap_scheduler_supported(config)
+    )
 
 
 @dataclass
@@ -1922,6 +1936,18 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     f"unknown p2p_overlap_dw_calc entries {unknown}, "
                     f"expected a subset of {list(P2P_OVERLAP_DW_CALC_CHOICES)}"
+                )
+            if self.p2p_overlap_dw_calc and not dw_overlap_scheduler_supported(
+                self
+            ):
+                raise ValueError(
+                    "p2p_overlap_dw_calc requires pipeline_model_parallel_size "
+                    "> 1 and virtual_pipeline_model_parallel_size > 1 "
+                    "(the interleaved/VPP scheduler); got "
+                    f"pipeline_model_parallel_size="
+                    f"{self.pipeline_model_parallel_size}, "
+                    f"virtual_pipeline_model_parallel_size="
+                    f"{self.virtual_pipeline_model_parallel_size}"
                 )
 
         if self.mtp_shared_last_layer:
