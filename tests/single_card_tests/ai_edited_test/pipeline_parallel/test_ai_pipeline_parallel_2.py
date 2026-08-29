@@ -90,7 +90,7 @@ class TestPipelineParallelMicroStepLocations(unittest.TestCase):
         )
 
         members = list(PipelineParallelMicroStepLocations)
-        self.assertEqual(len(members), 4)
+        self.assertEqual(len(members), 5)
 
 
 class TestPipelineParallelMicroStepCallback(unittest.TestCase):
